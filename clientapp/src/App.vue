@@ -1,64 +1,28 @@
 <script setup>
-import { ref } from 'vue'
-
-const forecasts = ref([])
-const apiError = ref('')
-const submitted = ref(null)
-
-async function loadForecasts() {
-  apiError.value = ''
-  try {
-    const res = await fetch('/WeatherForecast')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    forecasts.value = await res.json()
-  } catch (err) {
-    apiError.value = err.message
-  }
-}
-
-function handleSubmit(data) {
-  submitted.value = data
-}
+import FormBuilder from './components/FormBuilder.vue'
 </script>
 
 <template>
   <main>
-    <h1>FormKit + Vue 3</h1>
-
-    <FormKit type="form" submit-label="Submit" @submit="handleSubmit">
-      <FormKit type="text" name="name" label="Name" validation="required" />
-      <FormKit
-        type="email"
-        name="email"
-        label="Email"
-        validation="required|email"
-      />
-      <FormKit
-        type="select"
-        name="summary"
-        label="Preferred weather"
-        :options="['Freezing', 'Chilly', 'Mild', 'Warm', 'Scorching']"
-      />
-    </FormKit>
-
-    <pre v-if="submitted">{{ submitted }}</pre>
-
-    <h2>API check</h2>
-    <button type="button" @click="loadForecasts">Load /WeatherForecast</button>
-    <p v-if="apiError">Request failed: {{ apiError }}</p>
-    <ul>
-      <li v-for="f in forecasts" :key="f.date">
-        {{ f.date }} — {{ f.temperatureC }}°C, {{ f.summary }}
-      </li>
-    </ul>
+    <h1>Form builder spike</h1>
+    <p class="lede">
+      Drag to reorder, retype and rename fields, then save. Evaluating what an
+      in-house builder costs versus licensing one.
+    </p>
+    <FormBuilder />
   </main>
 </template>
 
 <style scoped>
 main {
-  max-width: 32rem;
+  max-width: 80rem;
   margin: 0 auto;
   padding: 2rem;
   text-align: left;
+}
+
+.lede {
+  color: #666;
+  margin-bottom: 1.5rem;
 }
 </style>
