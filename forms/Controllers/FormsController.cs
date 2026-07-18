@@ -7,9 +7,38 @@ namespace forms.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class FormsController(IFormStore store) : ControllerBase
+public class FormsController(IFormStore store, IFormSchemaGenerator? generator = null) : ControllerBase
 {
     private const int MaxNameLength = 200;
+
+    /// <summary>
+    /// Generates a schema from a natural-language prompt. Returns the schema for
+    /// the user to review and edit — it is deliberately not persisted here, so a
+    /// generation is a starting point rather than a saved form.
+    /// </summary>
+    [HttpPost("generate")]
+    public async Task<IActionResult> Generate(
+        [FromBody] GenerateFormRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (generator is null)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Title = "Generation unavailable",
+                Detail = "No Anthropic API key is configured on the server.",
+            });
+        }
+
+        var result = await generator.GenerateAsync(request.Prompt ?? string.Empty, cancellationToken);
+
+        if (!result.Success)
+        {
+            return BadRequest(new ProblemDetails { Title = "Generation failed", Detail = result.Error });
+        }
+
+        return Ok(new { name = result.Name, schema = result.Schema });
+    }
 
     [HttpGet]
     public ActionResult<IEnumerable<FormDefinition>> GetAll() => Ok(store.GetAll());

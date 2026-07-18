@@ -62,6 +62,40 @@ export function toEditorNodes(schema) {
   return schema.map((node) => ({ ...node, _uid: nextUid(), _kind: FIELD_KIND }))
 }
 
+/**
+ * Inverse of toSchema: turn a stored or generated FormKit schema back into the
+ * editor's flat list. A multi-step schema is flattened into fields plus step
+ * markers, so anything the API returns is editable with the same drag, retype,
+ * and rename affordances as a form built by hand.
+ */
+export function fromSchema(schema) {
+  if (!Array.isArray(schema)) return []
+
+  const multiStep = schema.find((node) => node?.$formkit === 'multi-step')
+  if (!multiStep) return toEditorNodes(schema)
+
+  const nodes = []
+
+  ;(multiStep.children ?? []).forEach((step, index) => {
+    // Emit a marker for every step including the first. groupIntoSteps starts a
+    // new group at a marker and fills it with the fields that follow, so a
+    // leading marker does not produce an empty step — and dropping it would
+    // silently discard the first step's label on the way back out.
+    nodes.push({
+      _uid: nextUid(),
+      _kind: STEP_KIND,
+      name: step.name ?? `step${index + 1}`,
+      label: step.label ?? `Step ${index + 1}`,
+    })
+
+    for (const field of step.children ?? []) {
+      nodes.push({ ...field, _uid: nextUid(), _kind: FIELD_KIND })
+    }
+  })
+
+  return nodes
+}
+
 function stripEditorProps(node) {
   const { _uid, _kind, ...rest } = node
   return rest

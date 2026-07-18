@@ -7,6 +7,7 @@ import {
   createNode,
   createStep,
   findDuplicateNames,
+  fromSchema,
   isStep,
   retypeNode,
   toSchema,
@@ -112,6 +113,40 @@ function applyOptions(uid, text) {
   updateProp(uid, 'options', options)
 }
 
+const aiPrompt = ref('')
+const generateState = ref({ status: 'idle', message: '' })
+
+async function generate() {
+  if (!aiPrompt.value.trim()) return
+
+  generateState.value = { status: 'working', message: 'Generating…' }
+  try {
+    const res = await fetch('/api/forms/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: aiPrompt.value }),
+    })
+
+    if (!res.ok) {
+      const problem = await res.json().catch(() => null)
+      throw new Error(problem?.detail ?? `HTTP ${res.status}`)
+    }
+
+    const result = await res.json()
+    // Generated forms land in the same editable model as hand-built ones —
+    // the prompt is a starting point, not a finished artifact.
+    nodes.value = fromSchema(result.schema)
+    selectedUid.value = nodes.value.find((n) => !isStep(n))?._uid ?? null
+    formName.value = result.name ?? formName.value
+    generateState.value = {
+      status: 'done',
+      message: `Generated ${nodes.value.filter((n) => !isStep(n)).length} fields — edit below.`,
+    }
+  } catch (err) {
+    generateState.value = { status: 'error', message: err.message }
+  }
+}
+
 async function save() {
   saveState.value = { status: 'saving', message: '' }
   try {
@@ -140,6 +175,34 @@ function handleSubmit(data) {
 
 <template>
   <div class="builder">
+    <!-- AI fast start -->
+    <section class="panel ai">
+      <h2>Start with AI</h2>
+      <textarea
+        v-model="aiPrompt"
+        rows="3"
+        data-testid="ai-prompt"
+        placeholder="Describe the form you need — e.g. “a job application with contact details, work history and a cover letter”"
+      ></textarea>
+      <button
+        type="button"
+        class="primary"
+        data-testid="ai-generate"
+        :disabled="generateState.status === 'working' || !aiPrompt.trim()"
+        @click="generate"
+      >
+        {{ generateState.status === 'working' ? 'Generating…' : 'Generate form' }}
+      </button>
+      <p
+        v-if="generateState.message"
+        :class="generateState.status === 'error' ? 'error' : 'ok'"
+        data-testid="ai-status"
+      >
+        {{ generateState.message }}
+      </p>
+      <p class="hint">Replaces the current fields. Everything stays editable.</p>
+    </section>
+
     <!-- Palette -->
     <section class="panel">
       <h2>Add field</h2>
@@ -320,8 +383,29 @@ function handleSubmit(data) {
 }
 
 .preview {
-  grid-row: span 3;
+  grid-row: span 4;
   grid-column: 2;
+}
+
+.ai {
+  border-color: #b9cdf5;
+  background: #f7faff;
+}
+
+.ai textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  resize: vertical;
+}
+
+.ai .primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .panel {
