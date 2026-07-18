@@ -2,7 +2,13 @@
 import { computed, ref, watch } from 'vue'
 import { FormKitSchema } from '@formkit/vue'
 import { useDragAndDrop } from '@formkit/drag-and-drop/vue'
-import { FIELD_TYPES, getFieldType } from '../builder/fieldTypes.js'
+import {
+  COLUMN_SPANS,
+  DEFAULT_COLUMN_SPAN,
+  FIELD_TYPES,
+  GRID_COLUMNS,
+  getFieldType,
+} from '../builder/fieldTypes.js'
 import {
   createNode,
   createStep,
@@ -10,13 +16,21 @@ import {
   fromSchema,
   isStep,
   retypeNode,
+  toRenderSchema,
   toSchema,
 } from '../builder/schemaModel.js'
 
 // useDragAndDrop owns the array: `nodes` is reordered in place on drop.
+//
+// The canvas lays fields out on a wrapping grid, so drops are resolved in two
+// dimensions: the library compares the dragged and hovered rects, takes
+// whichever axis dominates, and applies the matching threshold. The horizontal
+// threshold is raised because side-by-side cards differ in width — against a
+// narrow neighbour the default trips as soon as the pointer enters the card,
+// which reads as the layout twitching before the user has committed to a side.
 const [listRef, nodes] = useDragAndDrop(
   [createNode('text'), createNode('email')],
-  { dragHandle: '.drag-handle' }
+  { threshold: { horizontal: 0.35, vertical: 0.15 } }
 )
 
 const selectedUid = ref(nodes.value[0]?._uid ?? null)
@@ -39,6 +53,32 @@ const isMultiStep = computed(() => nodes.value.some(isStep))
 const duplicateNames = computed(() => findDuplicateNames(nodes.value))
 
 const schema = computed(() => toSchema(nodes.value))
+
+// What the preview renders, and what a consumer of the saved form would render:
+// the same schema with columnSpan resolved to a grid class. Saving sends
+// `schema`, not this — the width stays semantic in storage.
+const renderSchema = computed(() => toRenderSchema(schema.value))
+
+/**
+ * One field, rendered on the canvas exactly as the preview renders it.
+ *
+ * The width is deliberately dropped: the card itself carries the col-span class
+ * and is the grid item, so leaving columnSpan on the inner node would apply the
+ * span twice — once to the card, once to a field already filling it.
+ */
+function canvasSchema(node) {
+  const { _uid, _kind, columnSpan, ...rest } = node
+  return [rest]
+}
+
+/**
+ * FormKitSchema patches positionally, so each card is keyed on the identity of
+ * the field it renders. Without this a drag would leave cards showing the wrong
+ * input — the same lesson the preview already learned.
+ */
+function canvasKey(node) {
+  return `${node._uid}:${node.$formkit ?? ''}:${node.name}`
+}
 
 // Same lesson as the JSON pane in step 1: FormKitSchema patches positionally,
 // so the preview must remount when field identity changes. Keying on
@@ -175,7 +215,14 @@ function handleSubmit(data) {
 
 <template>
   <div class="builder">
-    <!-- AI fast start -->
+    <!--
+      Controls on the left, the form itself on the right. The canvas renders the
+      real inputs at their real widths, so it needs the wide column: a 12-track
+      grid in a 20rem sidebar would collapse every distinction between a half
+      and a quarter.
+    -->
+    <div class="sidebar">
+      <!-- AI fast start -->
     <section class="panel ai">
       <h2>Start with AI</h2>
       <textarea
@@ -225,42 +272,6 @@ function handleSubmit(data) {
       </p>
     </section>
 
-    <!-- Field list (drag to reorder) -->
-    <section class="panel">
-      <h2>Fields</h2>
-      <p class="hint">Drag the handle to reorder.</p>
-      <ul ref="listRef" class="field-list">
-        <li
-          v-for="node in nodes"
-          :key="node._uid"
-          :class="{ selected: node._uid === selectedUid, 'step-marker': isStep(node) }"
-          :data-uid="node._uid"
-          @click="selectedUid = node._uid"
-        >
-          <span class="drag-handle" aria-label="Drag to reorder">⠿</span>
-          <span class="field-summary">
-            <strong>{{ node.label || '(no label)' }}</strong>
-            <small>
-              {{ isStep(node) ? 'step break' : node.$formkit }} ·
-              <code :class="{ dupe: duplicateNames.has(node.name) }">{{ node.name }}</code>
-            </small>
-          </span>
-          <button
-            type="button"
-            class="remove"
-            :aria-label="`Remove ${node.label}`"
-            @click.stop="removeField(node._uid)"
-          >
-            ×
-          </button>
-        </li>
-      </ul>
-      <p v-if="duplicateNames.size" class="error">
-        Duplicate field names: {{ [...duplicateNames].join(', ') }}. The server will
-        reject this form.
-      </p>
-    </section>
-
     <!-- Property editor -->
     <section class="panel">
       <h2>Properties</h2>
@@ -277,6 +288,19 @@ function handleSubmit(data) {
           >
             <option v-for="f in FIELD_TYPES" :key="f.type" :value="f.type">
               {{ f.label }}
+            </option>
+          </select>
+        </label>
+
+        <label v-if="!isStep(selected)">
+          Width
+          <select
+            :value="selected.columnSpan ?? DEFAULT_COLUMN_SPAN"
+            data-testid="prop-width"
+            @change="updateProp(selected._uid, 'columnSpan', Number($event.target.value))"
+          >
+            <option v-for="option in COLUMN_SPANS" :key="option.span" :value="option.span">
+              {{ option.label }}
             </option>
           </select>
         </label>
@@ -336,25 +360,6 @@ function handleSubmit(data) {
       <p v-else class="hint">Select a field to edit it.</p>
     </section>
 
-    <!-- Live preview -->
-    <section class="panel preview">
-      <h2>Preview</h2>
-      <FormKit
-        v-if="nodes.length"
-        :key="previewKey"
-        type="form"
-        @submit="handleSubmit"
-      >
-        <FormKitSchema :schema="schema" />
-      </FormKit>
-      <p v-else class="hint">Add a field to see the preview.</p>
-
-      <template v-if="submitted">
-        <h3>Submitted</h3>
-        <pre data-testid="submitted">{{ submitted }}</pre>
-      </template>
-    </section>
-
     <!-- Save -->
     <section class="panel">
       <h2>Save</h2>
@@ -371,20 +376,111 @@ function handleSubmit(data) {
         {{ saveState.message }}
       </p>
     </section>
+    </div>
+
+    <div class="main">
+      <!-- Layout canvas: the form as it will render, rearranged by dragging -->
+      <section class="panel canvas-panel">
+        <h2>Fields</h2>
+        <p class="hint">
+          Drag a field to move it. Widths are set under Properties; a field that
+          no longer fits its row wraps onto the next one.
+        </p>
+        <ul ref="listRef" class="field-canvas">
+          <li
+            v-for="node in nodes"
+            :key="node._uid"
+            :class="[
+              'canvas-card',
+              isStep(node)
+                ? 'col-span-12'
+                : `col-span-${node.columnSpan ?? DEFAULT_COLUMN_SPAN}`,
+              {
+                selected: node._uid === selectedUid,
+                'step-marker': isStep(node),
+                'dupe-name': duplicateNames.has(node.name),
+              },
+            ]"
+            :data-uid="node._uid"
+            @click="selectedUid = node._uid"
+          >
+            <span v-if="isStep(node)" class="step-rule">
+              Step break — {{ node.label }} <code>{{ node.name }}</code>
+            </span>
+            <FormKitSchema v-else :key="canvasKey(node)" :schema="canvasSchema(node)" />
+
+            <!--
+              Covers the rendered field so the card reads as one draggable
+              object: without it a pointer down on an input would focus it
+              instead of starting a drag, and a select would swallow the
+              gesture entirely.
+            -->
+            <span class="canvas-shield"></span>
+
+            <button
+              type="button"
+              class="remove"
+              :aria-label="`Remove ${node.label}`"
+              @click.stop="removeField(node._uid)"
+            >
+              ×
+            </button>
+          </li>
+        </ul>
+        <p v-if="!nodes.length" class="hint">Add a field to start laying out.</p>
+        <p v-if="duplicateNames.size" class="error">
+          Duplicate field names: {{ [...duplicateNames].join(', ') }}. The server
+          will reject this form.
+        </p>
+      </section>
+
+      <!-- Live preview: the real, interactive, submittable form -->
+      <section class="panel preview">
+        <h2>Preview</h2>
+        <FormKit
+          v-if="nodes.length"
+          :key="previewKey"
+          type="form"
+          @submit="handleSubmit"
+        >
+          <FormKitSchema :schema="renderSchema" />
+        </FormKit>
+        <p v-else class="hint">Add a field to see the preview.</p>
+
+        <template v-if="submitted">
+          <h3>Submitted</h3>
+          <pre data-testid="submitted">{{ submitted }}</pre>
+        </template>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .builder {
   display: grid;
-  grid-template-columns: 20rem 1fr;
+  grid-template-columns: 20rem minmax(0, 1fr);
   gap: 1.5rem;
   align-items: start;
 }
 
-.preview {
-  grid-row: span 4;
-  grid-column: 2;
+/*
+ * minmax(0, 1fr) above rather than 1fr: the canvas is a grid whose tracks are
+ * sized from the column, and a bare 1fr floors at min-content, so a long field
+ * label would widen the column instead of wrapping.
+ */
+.sidebar,
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .builder {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .ai {
@@ -434,66 +530,80 @@ h2 {
   cursor: pointer;
 }
 
-.field-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-
-.field-list li {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  background: #fff;
-  cursor: pointer;
-}
-
-.field-list li.selected {
-  border-color: #4a7;
-  background: #f2fbf6;
-}
-
-.field-list li.step-marker {
-  background: #eef4ff;
-  border-color: #b9cdf5;
-  border-left: 3px solid #4a7adf;
-}
-
-.field-list li.step-marker.selected {
-  border-color: #4a7adf;
-}
-
 .palette .step-btn {
   border-color: #4a7adf;
   color: #2b56b5;
 }
 
-.drag-handle {
+/*
+ * The canvas grid itself lives in the global stylesheet, alongside the identical
+ * rules for .formkit-form and .formkit-step-inner — one definition for all three
+ * containers is what keeps the canvas and the preview honestly in step.
+ */
+.field-canvas {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-height: 3rem;
+}
+
+.canvas-card {
+  position: relative;
+  padding: 0.5rem 1.5rem 0.5rem 0.6rem;
+  border: 1px dashed transparent;
+  border-radius: 4px;
   cursor: grab;
-  color: #999;
-  user-select: none;
 }
 
-.field-summary {
+.canvas-card:hover {
+  border-color: #cfd6e4;
+  background: #fafbfd;
+}
+
+.canvas-card.selected {
+  border-color: #4a7;
+  border-style: solid;
+  background: #f2fbf6;
+}
+
+.canvas-card.dupe-name {
+  border-color: #b00020;
+  border-style: solid;
+}
+
+/*
+ * The library clones the card while dragging; keeping the cursor grabbing here
+ * stops the pointer flicking back to the arrow mid-drag.
+ */
+.canvas-card:active {
+  cursor: grabbing;
+}
+
+.canvas-card.step-marker {
+  padding: 0;
+}
+
+.step-rule {
   display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.75rem;
+  color: #2b56b5;
+  background: #eef4ff;
+  border: 1px solid #b9cdf5;
+  border-left: 3px solid #4a7adf;
+  border-radius: 4px;
 }
 
-.field-summary small {
-  color: #777;
-}
-
-code.dupe {
-  color: #b00020;
-  font-weight: 700;
+/*
+ * Transparent and on top of the card's contents. The inputs below still render
+ * exactly as they will in the form, but never take focus or a click.
+ */
+.canvas-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
 }
 
 .remove {
@@ -506,6 +616,21 @@ code.dupe {
 
 .remove:hover {
   color: #b00020;
+}
+
+/* Above the shield, or it could not be clicked. */
+.canvas-card .remove {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  z-index: 2;
+  line-height: 1;
+  opacity: 0;
+}
+
+.canvas-card:hover .remove,
+.canvas-card.selected .remove {
+  opacity: 1;
 }
 
 label {

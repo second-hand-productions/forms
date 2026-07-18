@@ -1,4 +1,10 @@
-import { FIELD_KIND, STEP_KIND, propsForType } from './fieldTypes.js'
+import {
+  DEFAULT_COLUMN_SPAN,
+  FIELD_KIND,
+  STEP_KIND,
+  normalizeColumnSpan,
+  propsForType,
+} from './fieldTypes.js'
 
 // The builder needs stable per-field identity that survives reordering,
 // renaming, and retyping. FormKit's `name` can't serve that purpose — the user
@@ -160,6 +166,30 @@ export function toSchema(nodes, { multiStepName = 'steps' } = {}) {
       children,
     },
   ]
+}
+
+/**
+ * Translate the stored schema into what FormKit actually renders.
+ *
+ * `columnSpan` is the builder's own vocabulary — an integer the server can
+ * bound. FormKit knows nothing about it, so the width becomes an `outerClass`
+ * here, at the last moment. Keeping the translation on this side means the
+ * stored schema stays semantic and the server never has to allowlist a class
+ * string, which it could not meaningfully validate.
+ */
+export function toRenderSchema(schema) {
+  return schema.map((node) => {
+    const { columnSpan, children, ...rest } = node
+
+    if (children) {
+      return { ...rest, children: toRenderSchema(children) }
+    }
+
+    return {
+      ...rest,
+      outerClass: `col-span-${normalizeColumnSpan(columnSpan ?? DEFAULT_COLUMN_SPAN)}`,
+    }
+  })
 }
 
 /**

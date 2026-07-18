@@ -47,7 +47,17 @@ public static class FormSchemaValidator
         "$formkit", "name", "label", "help", "placeholder", "validation",
         "validationLabel", "options", "value", "rows", "cols",
         "min", "max", "step", "multiple", "disabled", "id",
+        "columnSpan",
     };
+
+    /// <summary>
+    /// Bounds on a field's <c>columnSpan</c>, the builder's own layout
+    /// vocabulary: how many of twelve grid columns the field occupies. Deliberately
+    /// not a CSS class — a class string is unvalidatable here, whereas a bounded
+    /// integer is, and the client resolves it to a class at render time.
+    /// </summary>
+    private const int MinColumnSpan = 1;
+    private const int MaxColumnSpan = 12;
 
     /// <summary>Props valid only on container nodes.</summary>
     private static readonly HashSet<string> AllowedContainerProps = new(StringComparer.Ordinal)
@@ -174,6 +184,21 @@ public static class FormSchemaValidator
                     ? $"Node {path} (\"{type}\") has unsupported property \"{prop.Name}\"."
                     : $"Node {path} has unsupported property \"{prop.Name}\".";
                 return false;
+            }
+
+            if (prop.Name == "columnSpan")
+            {
+                if (prop.Value.ValueKind != JsonValueKind.Number
+                    || !prop.Value.TryGetInt32(out var span)
+                    || span < MinColumnSpan
+                    || span > MaxColumnSpan)
+                {
+                    error = $"Node {path} property \"columnSpan\" must be an integer "
+                        + $"between {MinColumnSpan} and {MaxColumnSpan}.";
+                    return false;
+                }
+
+                continue;
             }
 
             if (prop.Name == "children")

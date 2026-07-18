@@ -5,7 +5,8 @@
       "name": "clientapp",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "clientapp"],
-      "port": 5173
+      "port": 5173,
+      "autoPort": true
     }
   ]
 }

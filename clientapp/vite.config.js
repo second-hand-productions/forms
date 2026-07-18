@@ -13,6 +13,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [vue()],
     server: {
+      // Honour PORT so more than one dev server can run side by side.
+      port: Number(process.env.PORT) || 5173,
       proxy: {
         '/api': {
           target,

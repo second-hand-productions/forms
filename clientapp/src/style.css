@@ -294,3 +294,63 @@ code {
     border-right-color: var(--border);
   }
 }
+
+/*
+ * Field widths for forms built by the builder. `columnSpan` in the schema is
+ * resolved to one of these classes at render time (toRenderSchema), so the
+ * stored form stays free of class names.
+ *
+ * Global rather than scoped: FormKitSchema renders fields inside FormKit's own
+ * components, which a scoped stylesheet's data attribute does not reach.
+ *
+ * Three grid containers, because a field's parent depends on where it is: a flat
+ * form puts fields straight in the form element, a multi-step form puts them in
+ * each step's inner container, and the builder's canvas puts them in its own
+ * list. Styling only the form would leave every multi-step field full width
+ * whatever span it was given.
+ *
+ * The canvas sharing this definition is the point, not a convenience: the
+ * editor's layout is the preview's layout because it is the same rule, so the
+ * two cannot drift apart.
+ */
+.formkit-form,
+.formkit-step-inner,
+.field-canvas {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 0 1rem;
+  align-items: start;
+}
+
+/*
+ * Anything not carrying a span — the submit button, the multi-step wrapper, the
+ * step navigation — takes the full width. The span classes below are more
+ * specific, so a field still gets its own width.
+ */
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > * {
+  grid-column: 1 / -1;
+}
+
+/*
+ * :is() takes the specificity of its most specific argument, so each of these
+ * scores one class higher than the catch-all above and wins.
+ */
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-1 { grid-column: span 1; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-2 { grid-column: span 2; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-3 { grid-column: span 3; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-4 { grid-column: span 4; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-5 { grid-column: span 5; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-6 { grid-column: span 6; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-7 { grid-column: span 7; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-8 { grid-column: span 8; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-9 { grid-column: span 9; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-10 { grid-column: span 10; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-11 { grid-column: span 11; }
+:is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-12 { grid-column: span 12; }
+
+/* Columns are a desktop affordance; below this every field takes the row. */
+@media (max-width: 720px) {
+  :is(.formkit-form, .formkit-step-inner, .field-canvas) > [class*='col-span-'] {
+    grid-column: 1 / -1;
+  }
+}
