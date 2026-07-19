@@ -3,6 +3,9 @@
 ###############################################################################
 * text=auto
 
+# Shell scripts must keep LF — CRLF breaks the shebang on Linux.
+*.sh text eol=lf
+
 ###############################################################################
 # Set default behavior for command prompt diff.
 #
