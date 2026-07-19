@@ -19,7 +19,9 @@ export default defineConfig(({ mode }) => {
       // Honour PORT so more than one dev server can run side by side.
       port: Number(process.env.PORT) || 5173,
       proxy: {
-        '/api': {
+        // Requests are prefixed with the base path, and the API strips it via
+        // UsePathBase, so the prefix is forwarded rather than rewritten.
+        '/forms/api': {
           target,
           changeOrigin: true,
           // VS dev certificate is self-signed

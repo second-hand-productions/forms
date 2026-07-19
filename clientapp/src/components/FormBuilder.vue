@@ -19,6 +19,7 @@ import {
   toRenderSchema,
   toSchema,
 } from '../builder/schemaModel.js'
+import { apiUrl } from '../api.js'
 
 // useDragAndDrop owns the array: `nodes` is reordered in place on drop.
 //
@@ -184,7 +185,7 @@ async function generate() {
 
   generateState.value = { status: 'working', message: 'Generating…' }
   try {
-    const res = await fetch('/api/forms/generate', {
+    const res = await fetch(apiUrl('/forms/generate'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: aiPrompt.value }),
@@ -216,7 +217,7 @@ async function generate() {
 async function save() {
   saveState.value = { status: 'saving', message: '' }
   try {
-    const res = await fetch('/api/forms', {
+    const res = await fetch(apiUrl('/forms'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: formName.value, schema: schema.value }),
