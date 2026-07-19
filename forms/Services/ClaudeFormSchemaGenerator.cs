@@ -56,6 +56,9 @@ public class ClaudeFormSchemaGenerator(
           "required|length:0,500". Use "" when the field is optional and unconstrained.
         - `options` applies only to select and radio. Leave it empty for every other type.
         - `placeholder` and `help` are optional; use "" when they'd add nothing.
+        - No user-visible text may begin with "$" — FormKit would evaluate it as an
+          expression. Write "50 USD" or "Under 100 dollars" rather than "$50", and put
+          any currency symbol later in the string ("Budget in $" is fine).
         - `columnSpan` is the field's width on a twelve-column grid: 12 is full width, 6 is
           half, 4 is a third, 3 is a quarter. Fields flow left to right and wrap onto a new
           row when the next one no longer fits, so a row is formed by spans that add up to
@@ -166,9 +169,10 @@ public class ClaudeFormSchemaGenerator(
         {
             if (groups.Count == 0 || field.StartsNewStep)
             {
-                var label = string.IsNullOrWhiteSpace(field.StepLabel)
+                var stepLabel = Literal(field.StepLabel);
+                var label = string.IsNullOrWhiteSpace(stepLabel)
                     ? $"Step {groups.Count + 1}"
-                    : field.StepLabel.Trim();
+                    : stepLabel;
                 groups.Add((label, []));
             }
 
@@ -198,6 +202,15 @@ public class ClaudeFormSchemaGenerator(
         return JsonSerializer.SerializeToElement(nodes);
     }
 
+    /// <summary>
+    /// Strips a leading "$", which FormKit evaluates as an expression and the
+    /// validator therefore rejects. The system prompt already asks for this, but a
+    /// price-shaped label ("$50") slipping through would otherwise cost the whole
+    /// form — the same defensive stance as the type and span fallbacks.
+    /// </summary>
+    private static string Literal(string? text) =>
+        string.IsNullOrWhiteSpace(text) ? string.Empty : text.TrimStart('$').TrimStart();
+
     private static Dictionary<string, object> ToNode(GeneratedField field)
     {
         var node = new Dictionary<string, object>
@@ -206,11 +219,11 @@ public class ClaudeFormSchemaGenerator(
             // reject it and lose the whole form over one bad field.
             ["$formkit"] = AllowedTypes.Contains(field.Type) ? field.Type : "text",
             ["name"] = field.Name,
-            ["label"] = field.Label,
+            ["label"] = Literal(field.Label),
         };
 
-        if (!string.IsNullOrWhiteSpace(field.Placeholder)) node["placeholder"] = field.Placeholder;
-        if (!string.IsNullOrWhiteSpace(field.Help)) node["help"] = field.Help;
+        if (!string.IsNullOrWhiteSpace(field.Placeholder)) node["placeholder"] = Literal(field.Placeholder);
+        if (!string.IsNullOrWhiteSpace(field.Help)) node["help"] = Literal(field.Help);
         if (!string.IsNullOrWhiteSpace(field.Validation)) node["validation"] = field.Validation;
 
         if (field.Options.Count > 0 && field.Type is "select" or "radio")
@@ -218,8 +231,9 @@ public class ClaudeFormSchemaGenerator(
             var options = new Dictionary<string, string>();
             foreach (var option in field.Options)
             {
-                if (string.IsNullOrWhiteSpace(option.Value)) continue;
-                options[option.Value] = string.IsNullOrWhiteSpace(option.Label) ? option.Value : option.Label;
+                var value = Literal(option.Value);
+                if (string.IsNullOrWhiteSpace(value)) continue;
+                options[value] = string.IsNullOrWhiteSpace(option.Label) ? value : Literal(option.Label);
             }
 
             if (options.Count > 0) node["options"] = options;
