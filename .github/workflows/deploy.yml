@@ -6,55 +6,44 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or SHA to deploy"
+        required: false
+        default: main
 
 concurrency:
   group: deploy-forms
   cancel-in-progress: false
-
-env:
-  IMAGE_NAME: forms
-  CONTAINER_NAME: forms
-  HOST_PORT: "8080"
 
 jobs:
   deploy:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Manual runs deploy the requested ref; pushes deploy the pushed commit.
+          ref: ${{ github.event.inputs.ref || github.sha }}
 
-      - name: Build image
-        run: |
-          docker build \
-            -f forms/Dockerfile \
-            -t "$IMAGE_NAME:${{ github.sha }}" \
-            -t "$IMAGE_NAME:latest" \
-            .
-
-      - name: Restart container
+      - name: Build and deploy
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IMAGE_TAG: ${{ github.sha }}
+          HOST_PORT: "8080"
         run: |
-          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-          docker run -d \
-            --name "$CONTAINER_NAME" \
-            --restart unless-stopped \
-            -p "$HOST_PORT:8080" \
-            -e ASPNETCORE_ENVIRONMENT=Production \
-            -e ANTHROPIC_API_KEY \
-            "$IMAGE_NAME:${{ github.sha }}"
+          chmod +x deploy/deploy.sh
+          ./deploy/deploy.sh
 
-      - name: Smoke test
+      - name: Install nginx vhost
+        # Skips cleanly until the one-time server setup in deploy/README.md is
+        # done, so the app deploy above works with or without it.
         run: |
-          for i in $(seq 1 30); do
-            if curl -fsS "http://localhost:$HOST_PORT/healthz" >/dev/null; then
-              echo "Healthy after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Container failed to become healthy:"
-          docker logs --tail 50 "$CONTAINER_NAME"
-          exit 1
+          if [ -x /usr/local/sbin/deploy-forms-nginx.sh ]; then
+            sudo /usr/local/sbin/deploy-forms-nginx.sh "$PWD/deploy/forms.nginx.conf"
+          else
+            echo "deploy-forms-nginx.sh not installed — skipping vhost install."
+            echo "See deploy/README.md for the one-time setup."
+          fi
 
       - name: Prune old images
         if: always()
