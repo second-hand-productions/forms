@@ -1,0 +1,61 @@
+name: Build and deploy
+
+# The self-hosted runner lives on the same Ubuntu box we deploy to, so the
+# image is built and run locally — no registry push or SSH step involved.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-forms
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: forms
+  CONTAINER_NAME: forms
+  HOST_PORT: "8080"
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build \
+            -f forms/Dockerfile \
+            -t "$IMAGE_NAME:${{ github.sha }}" \
+            -t "$IMAGE_NAME:latest" \
+            .
+
+      - name: Restart container
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            -p "$HOST_PORT:8080" \
+            -e ASPNETCORE_ENVIRONMENT=Production \
+            -e ANTHROPIC_API_KEY \
+            "$IMAGE_NAME:${{ github.sha }}"
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:$HOST_PORT/healthz" >/dev/null; then
+              echo "Healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Container failed to become healthy:"
+          docker logs --tail 50 "$CONTAINER_NAME"
+          exit 1
+
+      - name: Prune old images
+        if: always()
+        run: docker image prune -f

@@ -33,12 +33,23 @@ var app = builder.Build();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+
+    // Only meaningful outside the container: the image listens on plain HTTP
+    // and TLS is terminated upstream, so redirecting there would loop.
+    app.UseHttpsRedirection();
 }
 
-app.UseHttpsRedirection();
+// The published image drops the built Vue app in wwwroot.
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 app.UseAuthorization();
 
 app.MapControllers();
+
+app.MapGet("/healthz", () => Results.Ok("ok"));
+
+// Client-side routes fall through to the SPA shell; /api/* is matched above.
+app.MapFallbackToFile("index.html");
 
 app.Run();
