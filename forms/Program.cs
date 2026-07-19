@@ -36,6 +36,11 @@ var app = builder.Build();
 // through untouched.
 app.UsePathBase("/forms");
 
+// UseRouting is called explicitly so it lands *after* UsePathBase. WebApplication
+// otherwise auto-inserts it at the very start of the pipeline, which would match
+// routes against the unstripped path and send /forms/api/... to the SPA fallback.
+app.UseRouting();
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
