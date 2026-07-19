@@ -11,6 +11,9 @@ export default defineConfig(({ mode }) => {
   const target = env.VITE_API_URL || DEFAULT_API_URL
 
   return {
+    // Mounted at /forms/ behind the shared nginx root. Baked into asset URLs at
+    // build time, so it must match app.UsePathBase in forms/Program.cs.
+    base: '/forms/',
     plugins: [vue()],
     server: {
       // Honour PORT so more than one dev server can run side by side.

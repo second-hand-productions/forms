@@ -29,6 +29,13 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
+// The app is mounted under /forms/ on the shared nginx root, which forwards the
+// prefix rather than stripping it. Must match `base` in clientapp/vite.config.js
+// — that one is baked in at build time, so the two are changed together.
+// Requests without the prefix (e.g. the container's own /healthz probe) pass
+// through untouched.
+app.UsePathBase("/forms");
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {

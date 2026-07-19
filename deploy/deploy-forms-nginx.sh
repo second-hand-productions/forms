@@ -19,8 +19,13 @@ set -euo pipefail
 
 NGINX_CONF="${1:?usage: deploy-forms-nginx.sh <nginx_conf>}"
 
-install -o root -g root -m 0644 "$NGINX_CONF" /etc/nginx/sites-available/forms
-ln -sf /etc/nginx/sites-available/forms /etc/nginx/sites-enabled/forms
+# Only this app's fragment is touched; the shared root vhost is infrastructure
+# and is never rewritten by an app pipeline.
+install -d -o root -g root -m 0755 /etc/nginx/apps.d
+install -o root -g root -m 0644 "$NGINX_CONF" /etc/nginx/apps.d/forms.conf
+
+# Retire the standalone vhost from the pre-path-based layout, if present.
+rm -f /etc/nginx/sites-enabled/forms
 
 # Validate before reloading. On failure, set -e aborts here and the running
 # nginx keeps its current in-memory config untouched.
