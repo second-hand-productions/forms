@@ -33,6 +33,19 @@ public class ClaudeFormSchemaGenerator(
         "radio", "checkbox", "date", "tel", "url",
     ];
 
+    /// <summary>
+    /// Widths the model may choose from, on a twelve-column grid.
+    ///
+    /// A subset of 1..12 rather than the full range, and deliberately the same
+    /// set the builder's Width dropdown offers (COLUMN_SPANS in
+    /// clientapp/src/builder/fieldTypes.js). A generated span of, say, 5 would
+    /// validate and render, but the dropdown has no entry for it, so opening the
+    /// form in the builder would show an empty Width control.
+    /// </summary>
+    private static readonly int[] AllowedColumnSpans = [3, 4, 6, 8, 9, 12];
+
+    private const int FullWidthSpan = 12;
+
     private const string SystemPrompt = """
         You design web forms. Given a description, produce the fields the form needs.
 
@@ -43,6 +56,16 @@ public class ClaudeFormSchemaGenerator(
           "required|length:0,500". Use "" when the field is optional and unconstrained.
         - `options` applies only to select and radio. Leave it empty for every other type.
         - `placeholder` and `help` are optional; use "" when they'd add nothing.
+        - `columnSpan` is the field's width on a twelve-column grid: 12 is full width, 6 is
+          half, 4 is a third, 3 is a quarter. Fields flow left to right and wrap onto a new
+          row when the next one no longer fits, so a row is formed by spans that add up to
+          12 — two 6s, or a 4 and an 8, or four 3s.
+        - Put naturally paired short fields side by side: first and last name, city and
+          postcode, a date and a time. Keep anything the user types at length full width —
+          textareas, addresses, email, URLs. When in doubt use 12; a form that is merely
+          tidy beats one that is cramped.
+        - Do not leave a row part-filled. If three fields would sit on a row, give them 4
+          each rather than 6, 3 and 3, which wraps the last one on its own.
         - Only split into steps when a form is genuinely long (roughly 8+ fields) or has
           distinct phases. Set `startsNewStep` true on the first field of each step and give
           that field a `stepLabel`. For a single-step form set `startsNewStep` false everywhere
@@ -204,6 +227,13 @@ public class ClaudeFormSchemaGenerator(
 
         if (field.Type == "textarea") node["rows"] = 4;
 
+        // Same defensive stance as the type fallback above: an out-of-range span
+        // would fail validation and cost the whole form over one field's width.
+        // Omitted at full width — the client treats a missing span as 12, so
+        // this keeps generated schema as terse as a hand-built one.
+        var span = AllowedColumnSpans.Contains(field.ColumnSpan) ? field.ColumnSpan : FullWidthSpan;
+        if (span != FullWidthSpan) node["columnSpan"] = span;
+
         return node;
     }
 
@@ -216,6 +246,7 @@ public class ClaudeFormSchemaGenerator(
     private static Dictionary<string, JsonElement> BuildOutputSchema()
     {
         var types = string.Join(", ", AllowedTypes.Select(t => $"\"{t}\""));
+        var spans = string.Join(", ", AllowedColumnSpans);
 
         var schema = $$"""
             {
@@ -250,12 +281,17 @@ public class ClaudeFormSchemaGenerator(
                           "additionalProperties": false
                         }
                       },
+                      "columnSpan": {
+                        "type": "integer",
+                        "enum": [{{spans}}],
+                        "description": "Width on a 12-column grid: 12 full, 6 half, 4 a third, 3 a quarter. Fields wrap onto a new row when the next no longer fits."
+                      },
                       "startsNewStep": { "type": "boolean" },
                       "stepLabel": { "type": "string", "description": "Empty string unless startsNewStep is true." }
                     },
                     "required": [
                       "type", "name", "label", "placeholder", "help",
-                      "validation", "options", "startsNewStep", "stepLabel"
+                      "validation", "options", "columnSpan", "startsNewStep", "stepLabel"
                     ],
                     "additionalProperties": false
                   }

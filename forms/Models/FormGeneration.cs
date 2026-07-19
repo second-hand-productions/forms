@@ -52,6 +52,14 @@ public class GeneratedField
     [JsonPropertyName("options")]
     public List<GeneratedOption> Options { get; set; } = [];
 
+    /// <summary>
+    /// How many of the twelve grid columns the field occupies. Fields flow left
+    /// to right and wrap when the next one no longer fits, so this is what makes
+    /// generated forms lay out in rows rather than one field per line.
+    /// </summary>
+    [JsonPropertyName("columnSpan")]
+    public int ColumnSpan { get; set; } = 12;
+
     /// <summary>True when this field begins a new step in a multi-step form.</summary>
     [JsonPropertyName("startsNewStep")]
     public bool StartsNewStep { get; set; }

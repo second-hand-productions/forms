@@ -33,6 +33,29 @@ const [listRef, nodes] = useDragAndDrop(
   { threshold: { horizontal: 0.35, vertical: 0.15 } }
 )
 
+/**
+ * The builder is a three-page flow: describe, build, review.
+ *
+ * Local state rather than routes — the project has no router, and adding one to
+ * move between three panes of a single editor would put the in-progress form at
+ * the mercy of the back button, since nothing is persisted until save.
+ *
+ * Navigation is never blocked. Page 1 is skippable by definition, and an empty
+ * or half-built form on pages 2 and 3 says so in place; refusing to advance
+ * would hide the very thing the user is trying to look at.
+ */
+const PAGES = [
+  { id: 1, label: 'Describe', hint: 'Optional' },
+  { id: 2, label: 'Build' },
+  { id: 3, label: 'Review & save' },
+]
+
+const page = ref(1)
+
+function goTo(id) {
+  page.value = Math.min(Math.max(id, 1), PAGES.length)
+}
+
 const selectedUid = ref(nodes.value[0]?._uid ?? null)
 const formName = ref('Untitled form')
 const saveState = ref({ status: 'idle', message: '' })
@@ -180,8 +203,11 @@ async function generate() {
     formName.value = result.name ?? formName.value
     generateState.value = {
       status: 'done',
-      message: `Generated ${nodes.value.filter((n) => !isStep(n)).length} fields — edit below.`,
+      message: `Generated ${nodes.value.filter((n) => !isStep(n)).length} fields.`,
     }
+    // A successful generation is the end of page 1's job; carry the user to the
+    // fields rather than leaving them on a prompt box that has already run.
+    goTo(2)
   } catch (err) {
     generateState.value = { status: 'error', message: err.message }
   }
@@ -214,16 +240,27 @@ function handleSubmit(data) {
 </script>
 
 <template>
-  <div class="builder">
-    <!--
-      Controls on the left, the form itself on the right. The canvas renders the
-      real inputs at their real widths, so it needs the wide column: a 12-track
-      grid in a 20rem sidebar would collapse every distinction between a half
-      and a quarter.
-    -->
-    <div class="sidebar">
-      <!-- AI fast start -->
-    <section class="panel ai">
+  <div class="wizard">
+    <nav class="steps" aria-label="Builder steps">
+      <button
+        v-for="p in PAGES"
+        :key="p.id"
+        type="button"
+        class="step-tab"
+        :class="{ current: p.id === page, done: p.id < page }"
+        :aria-current="p.id === page ? 'step' : undefined"
+        :data-testid="`step-${p.id}`"
+        @click="goTo(p.id)"
+      >
+        <span class="step-num">{{ p.id }}</span>
+        {{ p.label }}
+        <small v-if="p.hint">{{ p.hint }}</small>
+      </button>
+    </nav>
+
+    <!-- Page 1: describe the form, or skip straight to building it -->
+    <div v-if="page === 1" class="page page-describe">
+      <section class="panel ai">
       <h2>Start with AI</h2>
       <textarea
         v-model="aiPrompt"
@@ -247,11 +284,26 @@ function handleSubmit(data) {
       >
         {{ generateState.message }}
       </p>
-      <p class="hint">Replaces the current fields. Everything stays editable.</p>
-    </section>
+        <p class="hint">Replaces the current fields. Everything stays editable.</p>
+      </section>
 
-    <!-- Palette -->
-    <section class="panel">
+      <div class="page-nav">
+        <button type="button" class="ghost" data-testid="skip-ai" @click="goTo(2)">
+          Skip — build it by hand →
+        </button>
+      </div>
+    </div>
+
+    <!--
+      Page 2. Controls on the left, the form itself on the right: the canvas
+      renders the real inputs at their real widths, so it needs the wide column —
+      a 12-track grid in a 20rem sidebar would collapse every distinction between
+      a half and a quarter.
+    -->
+    <div v-else-if="page === 2" class="page builder">
+      <div class="sidebar">
+        <!-- Palette -->
+        <section class="panel">
       <h2>Add field</h2>
       <div class="palette">
         <button
@@ -360,25 +412,9 @@ function handleSubmit(data) {
       <p v-else class="hint">Select a field to edit it.</p>
     </section>
 
-    <!-- Save -->
-    <section class="panel">
-      <h2>Save</h2>
-      <label>
-        Form name
-        <input v-model="formName" />
-      </label>
-      <button type="button" class="primary" @click="save">Save form</button>
-      <p
-        v-if="saveState.message"
-        :class="saveState.status === 'error' ? 'error' : 'ok'"
-        data-testid="save-status"
-      >
-        {{ saveState.message }}
-      </p>
-    </section>
-    </div>
+      </div>
 
-    <div class="main">
+      <div class="main">
       <!-- Layout canvas: the form as it will render, rearranged by dragging -->
       <section class="panel canvas-panel">
         <h2>Fields</h2>
@@ -433,8 +469,18 @@ function handleSubmit(data) {
           will reject this form.
         </p>
       </section>
+      </div>
 
-      <!-- Live preview: the real, interactive, submittable form -->
+      <div class="page-nav">
+        <button type="button" class="ghost" @click="goTo(1)">← Back</button>
+        <button type="button" class="primary" data-testid="to-review" @click="goTo(3)">
+          Review &amp; save →
+        </button>
+      </div>
+    </div>
+
+    <!-- Page 3: the real, interactive, submittable form, then save -->
+    <div v-else class="page page-review">
       <section class="panel preview">
         <h2>Preview</h2>
         <FormKit
@@ -445,18 +491,144 @@ function handleSubmit(data) {
         >
           <FormKitSchema :schema="renderSchema" />
         </FormKit>
-        <p v-else class="hint">Add a field to see the preview.</p>
+        <p v-else class="hint">
+          No fields yet — go back to Build and add some.
+        </p>
 
         <template v-if="submitted">
           <h3>Submitted</h3>
           <pre data-testid="submitted">{{ submitted }}</pre>
         </template>
       </section>
+
+      <section class="panel">
+        <h2>Save</h2>
+        <label>
+          Form name
+          <input v-model="formName" />
+        </label>
+        <!--
+          Duplicate names are surfaced here as well as on the canvas: this is the
+          last screen before the save the server would reject, and the field
+          causing it is no longer on screen to show inline.
+        -->
+        <p v-if="duplicateNames.size" class="error">
+          Duplicate field names: {{ [...duplicateNames].join(', ') }}. Fix these on
+          the Build step before saving.
+        </p>
+        <button
+          type="button"
+          class="primary"
+          :disabled="!nodes.length || saveState.status === 'saving'"
+          @click="save"
+        >
+          {{ saveState.status === 'saving' ? 'Saving…' : 'Save form' }}
+        </button>
+        <p
+          v-if="saveState.message"
+          :class="saveState.status === 'error' ? 'error' : 'ok'"
+          data-testid="save-status"
+        >
+          {{ saveState.message }}
+        </p>
+      </section>
+
+      <div class="page-nav">
+        <button type="button" class="ghost" @click="goTo(2)">← Back to build</button>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.wizard {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.steps {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.step-tab {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.5rem 0.9rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #666;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.step-tab small {
+  font-size: 0.7rem;
+  color: #999;
+}
+
+.step-tab.current {
+  border-color: #4a7adf;
+  color: #2b56b5;
+  background: #f7faff;
+}
+
+/* Visited steps stay reachable — nothing here is a commitment. */
+.step-tab.done .step-num {
+  background: #4a7;
+}
+
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  color: #fff;
+  background: #bbb;
+}
+
+.step-tab.current .step-num {
+  background: #4a7adf;
+}
+
+.page-describe,
+.page-review {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  max-width: 46rem;
+}
+
+.page-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+/* Sits below both columns of the builder grid rather than inside one. */
+.builder .page-nav {
+  grid-column: 1 / -1;
+}
+
+.ghost {
+  padding: 0.45rem 0.9rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #555;
+  background: none;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
 .builder {
   display: grid;
   grid-template-columns: 20rem minmax(0, 1fr);
@@ -499,7 +671,7 @@ function handleSubmit(data) {
   resize: vertical;
 }
 
-.ai .primary:disabled {
+.primary:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }

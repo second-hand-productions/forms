@@ -348,6 +348,22 @@ code {
 :is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-11 { grid-column: span 11; }
 :is(.formkit-form, .formkit-step-inner, .field-canvas) > .col-span-12 { grid-column: span 12; }
 
+/*
+ * Genesis caps .formkit-wrapper at 450px, which is a sensible default for a
+ * single-column form and wrong for a field that has been given an explicit
+ * width. Without this, every span whose column exceeds 450px renders the same
+ * control: two thirds (521px), three quarters (588px) and full width (790px)
+ * all collapse to 450, and only the narrower spans appear to work.
+ *
+ * Scoped to elements carrying a span, inside the grid containers, so genesis's
+ * default still applies to any form that has not asked for a layout.
+ */
+:is(.formkit-form, .formkit-step-inner, .field-canvas)
+  > [class*='col-span-']
+  .formkit-wrapper {
+  max-width: none;
+}
+
 /* Columns are a desktop affordance; below this every field takes the row. */
 @media (max-width: 720px) {
   :is(.formkit-form, .formkit-step-inner, .field-canvas) > [class*='col-span-'] {
