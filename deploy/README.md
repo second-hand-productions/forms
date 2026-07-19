@@ -4,8 +4,10 @@ The app is built and run as a Docker container by the self-hosted GitHub
 Actions runner on the Ubuntu box (the runner and the deploy target are the same
 machine, so there is no SSH step). nginx fronts it at `http://forms.lan/`.
 
-- [`deploy.sh`](deploy.sh) — unprivileged half: builds the image, restarts the
-  container, waits for `/healthz`. Runnable by hand: `./deploy/deploy.sh`.
+The build/run/health-check steps live directly in
+[`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml); use the
+workflow's **Run workflow** button to deploy a chosen branch, tag or SHA by hand.
+
 - [`forms.nginx.conf`](forms.nginx.conf) — the vhost, proxying `forms.lan` to
   the container on `127.0.0.1:8080`.
 - [`deploy-forms-nginx.sh`](deploy-forms-nginx.sh) — privileged half: installs
@@ -44,5 +46,5 @@ static DNS entry on the router for `forms.lan`.
 
 While nginx is not yet in place the container binds `0.0.0.0:8080`, so the app
 is reachable at `http://ubuntu.lan:8080`. Once `forms.lan` works, set
-`BIND_ADDR=127.0.0.1` in the workflow's deploy step so only nginx can reach the
-container.
+`BIND_ADDR: "127.0.0.1"` in the workflow's `env:` block so only nginx can reach
+the container.

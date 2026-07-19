@@ -16,6 +16,14 @@ concurrency:
   group: deploy-forms
   cancel-in-progress: false
 
+env:
+  IMAGE_NAME: forms
+  CONTAINER_NAME: forms
+  HOST_PORT: "8080"
+  # Once nginx fronts the app on forms.lan, set this to 127.0.0.1 so the raw
+  # port is no longer exposed on the LAN.
+  BIND_ADDR: "0.0.0.0"
+
 jobs:
   deploy:
     runs-on: self-hosted
@@ -25,14 +33,39 @@ jobs:
           # Manual runs deploy the requested ref; pushes deploy the pushed commit.
           ref: ${{ github.event.inputs.ref || github.sha }}
 
-      - name: Build and deploy
+      - name: Build image
+        run: |
+          docker build \
+            -f forms/Dockerfile \
+            -t "$IMAGE_NAME:${{ github.sha }}" \
+            -t "$IMAGE_NAME:latest" \
+            .
+
+      - name: Restart container
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          IMAGE_TAG: ${{ github.sha }}
-          HOST_PORT: "8080"
         run: |
-          chmod +x deploy/deploy.sh
-          ./deploy/deploy.sh
+          docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            -p "$BIND_ADDR:$HOST_PORT:8080" \
+            -e ASPNETCORE_ENVIRONMENT=Production \
+            -e ANTHROPIC_API_KEY \
+            "$IMAGE_NAME:${{ github.sha }}"
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:$HOST_PORT/healthz" >/dev/null; then
+              echo "Healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Container failed to become healthy:"
+          docker logs --tail 50 "$CONTAINER_NAME"
+          exit 1
 
       - name: Install nginx vhost
         # Skips cleanly until the one-time server setup in deploy/README.md is
