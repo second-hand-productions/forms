@@ -45,6 +45,11 @@ const [listRef, nodes] = useDragAndDrop(
  * or half-built form on pages 2 and 3 says so in place; refusing to advance
  * would hide the very thing the user is trying to look at.
  */
+// The pages are toggled with v-show, not v-if: useDragAndDrop binds to the canvas
+// <ul> the first time it appears and then stops watching, and it only tears down
+// on component unmount. A v-if would destroy that element on every navigation and
+// remount one nothing rebinds to, leaving the canvas silently undraggable —
+// reliably so after generating, since that path returns to Build from Describe.
 const PAGES = [
   { id: 1, label: 'Describe', hint: 'Optional' },
   { id: 2, label: 'Build' },
@@ -260,7 +265,7 @@ function handleSubmit(data) {
     </nav>
 
     <!-- Page 1: describe the form, or skip straight to building it -->
-    <div v-if="page === 1" class="page page-describe">
+    <div v-show="page === 1" class="page page-describe">
       <section class="panel ai">
       <h2>Start with AI</h2>
       <textarea
@@ -301,7 +306,7 @@ function handleSubmit(data) {
       a 12-track grid in a 20rem sidebar would collapse every distinction between
       a half and a quarter.
     -->
-    <div v-else-if="page === 2" class="page builder">
+    <div v-show="page === 2" class="page builder">
       <div class="sidebar">
         <!-- Palette -->
         <section class="panel">
@@ -481,7 +486,7 @@ function handleSubmit(data) {
     </div>
 
     <!-- Page 3: the real, interactive, submittable form, then save -->
-    <div v-else class="page page-review">
+    <div v-show="page === 3" class="page page-review">
       <section class="panel preview">
         <h2>Preview</h2>
         <FormKit
