@@ -46,9 +46,28 @@ public class ClaudeFormSchemaGenerator(
 
     private const int FullWidthSpan = 12;
 
-    private const string SystemPrompt = """
-        You design web forms. Given a description, produce the fields the form needs.
+    /// <summary>
+    /// Props the validator allows on a field but <see cref="GeneratedField"/> does
+    /// not model, so the model never sees them and cannot return them.
+    ///
+    /// On a refinement they are copied across from the field of the same name in
+    /// the form that was sent. Without that, every refine would silently reset a
+    /// textarea's row count or a number's bounds to the defaults — the model
+    /// would be deleting properties it was never shown, which is exactly the
+    /// failure an incremental edit is supposed to avoid.
+    /// </summary>
+    private static readonly string[] CarriedProps =
+    [
+        "rows", "cols", "min", "max", "step",
+        "value", "multiple", "disabled", "id", "validationLabel",
+    ];
 
+    /// <summary>
+    /// What a well-formed field looks like. Shared verbatim by generation and
+    /// refinement so a refined form obeys the same conventions as a generated
+    /// one — otherwise every edit would drift the form away from house style.
+    /// </summary>
+    private const string FieldRules = """
         Rules:
         - `name` is the submitted data key: camelCase, letters and digits only, unique within a step.
         - `label` is what the user reads. Keep it short and human.
@@ -73,22 +92,181 @@ public class ClaudeFormSchemaGenerator(
           distinct phases. Set `startsNewStep` true on the first field of each step and give
           that field a `stepLabel`. For a single-step form set `startsNewStep` false everywhere
           and leave `stepLabel` empty.
+        """;
+
+    private const string SystemPrompt = """
+        You design web forms. Given a description, produce the fields the form needs.
+
+        """
+        + FieldRules
+        + """
+
         - Prefer the smallest set of fields that actually satisfies the request. Do not invent
           fields the user did not ask for or imply.
         """;
 
-    public async Task<GenerationResult> GenerateAsync(string prompt, CancellationToken cancellationToken)
+    /// <summary>
+    /// The refine counterpart. The model still returns a whole form — the caller
+    /// replaces what it has either way — so the work this prompt does is making
+    /// "whole form" mean "the same form, with one thing changed" rather than a
+    /// fresh take on the same brief.
+    /// </summary>
+    private const string RefineSystemPrompt = """
+        You are editing a web form that already exists. You are given the form's current
+        fields as JSON, in exactly the shape you must produce, and a change the user wants
+        made. Apply the change and return the complete form — every field it should have
+        afterwards, in order — not just the parts that changed.
+
+        """
+        + FieldRules
+        + """
+
+        Editing rules. Where these conflict with anything above, these win:
+        - Return every field the form should still have, including those the change does not
+          touch. A field you omit is a field you deleted.
+        - A field the request does not concern comes back exactly as given: same name, label,
+          type, placeholder, help, validation, options, columnSpan and step. Do not reword,
+          reorder, retype or otherwise improve it. Tidying a field nobody asked you to touch
+          is a bug, not a courtesy.
+        - `name` is what already-submitted data is keyed on. Keep it stable for every field
+          that survives, even when you change that field's label.
+        - Keep the existing step structure — the same `startsNewStep` and `stepLabel` values —
+          unless the change asks for different steps.
+        - Add new fields where the request implies they belong; absent any hint, at the end of
+          the step they relate to. Re-balance a row's `columnSpan` values only on rows you
+          added a field to or removed one from.
+        - If the request describes no change to the fields, return the form unchanged.
+        """;
+
+    /// <summary>Indented so the current form reads as structure in the prompt, not as one long line.</summary>
+    private static readonly JsonSerializerOptions PromptJson = new() { WriteIndented = true };
+
+    public Task<GenerationResult> GenerateAsync(string prompt, CancellationToken cancellationToken)
+    {
+        if (!TryValidatePrompt(prompt, out var promptError))
+        {
+            return Task.FromResult(GenerationResult.Fail(promptError));
+        }
+
+        return RunAsync(SystemPrompt, prompt, "Generated form", carryOver: null, cancellationToken);
+    }
+
+    public Task<GenerationResult> RefineAsync(
+        string prompt,
+        string currentName,
+        JsonElement currentSchema,
+        CancellationToken cancellationToken)
+    {
+        if (!TryValidatePrompt(prompt, out var promptError))
+        {
+            return Task.FromResult(GenerationResult.Fail(promptError));
+        }
+
+        // The current form arrives in a request body like anything else. Gate it on
+        // the way in as well as on the way out: the allowlist that guards a save is
+        // also what bounds the size and shape of what we put in front of the model.
+        if (!FormSchemaValidator.TryValidate(currentSchema, out var schemaError))
+        {
+            return Task.FromResult(GenerationResult.Fail($"The current form is not valid: {schemaError}"));
+        }
+
+        var current = ToGeneratedForm(currentName, currentSchema);
+        if (current.Fields.Count == 0)
+        {
+            return Task.FromResult(GenerationResult.Fail("The current form has no fields to change."));
+        }
+
+        var message = $"""
+            Current form:
+            {JsonSerializer.Serialize(current, PromptJson)}
+
+            Requested change:
+            {prompt}
+            """;
+
+        // Fall back to the current name, not a generic one: an edit that says
+        // nothing about naming should leave the name alone.
+        var fallbackName = string.IsNullOrWhiteSpace(currentName) ? "Generated form" : currentName;
+        return RunAsync(RefineSystemPrompt, message, fallbackName, BuildCarryOver(currentSchema), cancellationToken);
+    }
+
+    /// <summary>
+    /// Indexes the form that was sent by field name, so props the model cannot
+    /// see can be restored onto the field they came from.
+    ///
+    /// Names are only unique within a step, so a name used by two steps is
+    /// dropped rather than guessed at: restoring one step's row count onto
+    /// another step's field would be a quieter bug than losing it.
+    /// </summary>
+    private static Dictionary<string, JsonElement> BuildCarryOver(JsonElement schema)
+    {
+        var byName = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        var ambiguous = new HashSet<string>(StringComparer.Ordinal);
+
+        void Visit(JsonElement list)
+        {
+            foreach (var node in list.EnumerateArray())
+            {
+                if (node.TryGetProperty("children", out var children)
+                    && children.ValueKind == JsonValueKind.Array)
+                {
+                    Visit(children);
+                    continue;
+                }
+
+                var name = GetString(node, "name");
+                if (name.Length == 0) continue;
+
+                if (!byName.TryAdd(name, node))
+                {
+                    ambiguous.Add(name);
+                }
+            }
+        }
+
+        if (schema.ValueKind == JsonValueKind.Array)
+        {
+            Visit(schema);
+        }
+
+        foreach (var name in ambiguous)
+        {
+            byName.Remove(name);
+        }
+
+        return byName;
+    }
+
+    private static bool TryValidatePrompt(string prompt, out string error)
     {
         if (string.IsNullOrWhiteSpace(prompt))
         {
-            return GenerationResult.Fail("Prompt is required.");
+            error = "Prompt is required.";
+            return false;
         }
 
         if (prompt.Length > MaxPromptLength)
         {
-            return GenerationResult.Fail($"Prompt may not exceed {MaxPromptLength} characters.");
+            error = $"Prompt may not exceed {MaxPromptLength} characters.";
+            return false;
         }
 
+        error = string.Empty;
+        return true;
+    }
+
+    /// <summary>
+    /// The half both entry points share: ask the model, assemble the schema, and
+    /// put it through the same gate a hand-built save goes through. Generation and
+    /// refinement differ only in the system prompt and the message.
+    /// </summary>
+    private async Task<GenerationResult> RunAsync(
+        string systemPrompt,
+        string userMessage,
+        string fallbackName,
+        IReadOnlyDictionary<string, JsonElement>? carryOver,
+        CancellationToken cancellationToken)
+    {
         GeneratedForm? generated;
         try
         {
@@ -103,8 +281,8 @@ public class ClaudeFormSchemaGenerator(
                         Effort = Effort.Medium,
                         Format = new JsonOutputFormat { Schema = BuildOutputSchema() },
                     },
-                    System = SystemPrompt,
-                    Messages = [new() { Role = Role.User, Content = prompt }],
+                    System = systemPrompt,
+                    Messages = [new() { Role = Role.User, Content = userMessage }],
                 },
                 cancellationToken);
 
@@ -143,7 +321,7 @@ public class ClaudeFormSchemaGenerator(
             return GenerationResult.Fail("The model produced no fields.");
         }
 
-        var schema = BuildFormKitSchema(generated);
+        var schema = BuildFormKitSchema(generated, carryOver);
 
         // Same gate as a hand-built save. Generated schema gets no special trust.
         if (!FormSchemaValidator.TryValidate(schema, out var error))
@@ -152,16 +330,124 @@ public class ClaudeFormSchemaGenerator(
             return GenerationResult.Fail($"The generated form was rejected: {error}");
         }
 
-        var name = string.IsNullOrWhiteSpace(generated.Name) ? "Generated form" : generated.Name.Trim();
+        var name = string.IsNullOrWhiteSpace(generated.Name) ? fallbackName : generated.Name.Trim();
         return GenerationResult.Ok(name, schema);
     }
+
+    /// <summary>
+    /// Inverse of <see cref="BuildFormKitSchema"/>: a stored FormKit schema back
+    /// into the flat shape the model reads and writes. Mirrors fromSchema() in
+    /// clientapp/src/builder/schemaModel.js — the nesting is unwound into fields
+    /// plus step markers, so the model never has to reason about two shapes.
+    /// </summary>
+    private static GeneratedForm ToGeneratedForm(string name, JsonElement schema)
+    {
+        var form = new GeneratedForm { Name = name };
+
+        if (schema.ValueKind != JsonValueKind.Array)
+        {
+            return form;
+        }
+
+        var multiStep = schema.EnumerateArray()
+            .FirstOrDefault(node => GetString(node, "$formkit") == "multi-step");
+
+        if (multiStep.ValueKind != JsonValueKind.Object)
+        {
+            foreach (var node in schema.EnumerateArray())
+            {
+                form.Fields.Add(ToGeneratedField(node));
+            }
+
+            return form;
+        }
+
+        if (!multiStep.TryGetProperty("children", out var steps) || steps.ValueKind != JsonValueKind.Array)
+        {
+            return form;
+        }
+
+        foreach (var step in steps.EnumerateArray())
+        {
+            if (!step.TryGetProperty("children", out var fields) || fields.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            var isFirstInStep = true;
+            foreach (var node in fields.EnumerateArray())
+            {
+                var field = ToGeneratedField(node);
+
+                // Marked on the first field of every step including the first:
+                // BuildFormKitSchema opens a group at the first field regardless,
+                // and takes the label from it, so dropping the marker here would
+                // lose step one's label on the way back out.
+                if (isFirstInStep)
+                {
+                    field.StartsNewStep = true;
+                    field.StepLabel = GetString(step, "label");
+                    isFirstInStep = false;
+                }
+
+                form.Fields.Add(field);
+            }
+        }
+
+        return form;
+    }
+
+    private static GeneratedField ToGeneratedField(JsonElement node)
+    {
+        var field = new GeneratedField
+        {
+            Type = GetString(node, "$formkit"),
+            Name = GetString(node, "name"),
+            Label = GetString(node, "label"),
+            Placeholder = GetString(node, "placeholder"),
+            Help = GetString(node, "help"),
+            Validation = GetString(node, "validation"),
+            // A field with no span predates the feature, or was omitted as terse
+            // full width by ToNode. Either way it renders at 12.
+            ColumnSpan = node.TryGetProperty("columnSpan", out var span)
+                && span.ValueKind == JsonValueKind.Number
+                && span.TryGetInt32(out var value)
+                    ? value
+                    : FullWidthSpan,
+        };
+
+        if (node.TryGetProperty("options", out var options) && options.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var entry in options.EnumerateObject())
+            {
+                field.Options.Add(new GeneratedOption
+                {
+                    Value = entry.Name,
+                    Label = entry.Value.ValueKind == JsonValueKind.String
+                        ? entry.Value.GetString()!
+                        : entry.Name,
+                });
+            }
+        }
+
+        return field;
+    }
+
+    private static string GetString(JsonElement node, string name) =>
+        node.ValueKind == JsonValueKind.Object
+        && node.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()!
+            : string.Empty;
 
     /// <summary>
     /// Assembles the FormKit schema. Flat when there are no step boundaries;
     /// multi-step > step > fields when there are — the same shape the builder
     /// produces, so generated and hand-built forms are indistinguishable downstream.
     /// </summary>
-    private static JsonElement BuildFormKitSchema(GeneratedForm generated)
+    private static JsonElement BuildFormKitSchema(
+        GeneratedForm generated,
+        IReadOnlyDictionary<string, JsonElement>? carryOver = null)
     {
         var groups = new List<(string Label, List<GeneratedField> Fields)>();
 
@@ -193,11 +479,11 @@ public class ClaudeFormSchemaGenerator(
                         ["$formkit"] = "step",
                         ["name"] = $"step{i + 1}",
                         ["label"] = g.Label,
-                        ["children"] = g.Fields.Select(ToNode).ToList(),
+                        ["children"] = g.Fields.Select(f => ToNode(f, carryOver)).ToList(),
                     }).ToList(),
                 },
             }
-            : groups[0].Fields.Select(ToNode).Cast<object>().ToList();
+            : groups[0].Fields.Select(f => ToNode(f, carryOver)).Cast<object>().ToList();
 
         return JsonSerializer.SerializeToElement(nodes);
     }
@@ -211,7 +497,9 @@ public class ClaudeFormSchemaGenerator(
     private static string Literal(string? text) =>
         string.IsNullOrWhiteSpace(text) ? string.Empty : text.TrimStart('$').TrimStart();
 
-    private static Dictionary<string, object> ToNode(GeneratedField field)
+    private static Dictionary<string, object> ToNode(
+        GeneratedField field,
+        IReadOnlyDictionary<string, JsonElement>? carryOver = null)
     {
         var node = new Dictionary<string, object>
         {
@@ -248,7 +536,43 @@ public class ClaudeFormSchemaGenerator(
         var span = AllowedColumnSpans.Contains(field.ColumnSpan) ? field.ColumnSpan : FullWidthSpan;
         if (span != FullWidthSpan) node["columnSpan"] = span;
 
+        ApplyCarriedProps(node, field, carryOver);
+
         return node;
+    }
+
+    /// <summary>
+    /// Restores the props in <see cref="CarriedProps"/> from the field of the same
+    /// name in the form that was sent, overwriting the defaults set above — a
+    /// carried rows=8 must beat the textarea default of 4, or carrying it would
+    /// achieve nothing.
+    ///
+    /// Only when the type is unchanged: these props are type-specific, and moving
+    /// a number's `max` onto the text field it was just retyped into would be
+    /// meaningless at best.
+    /// </summary>
+    private static void ApplyCarriedProps(
+        Dictionary<string, object> node,
+        GeneratedField field,
+        IReadOnlyDictionary<string, JsonElement>? carryOver)
+    {
+        if (carryOver is null || !carryOver.TryGetValue(field.Name, out var original))
+        {
+            return;
+        }
+
+        if (GetString(original, "$formkit") != (node["$formkit"] as string))
+        {
+            return;
+        }
+
+        foreach (var prop in original.EnumerateObject())
+        {
+            if (CarriedProps.Contains(prop.Name))
+            {
+                node[prop.Name] = prop.Value;
+            }
+        }
     }
 
     /// <summary>

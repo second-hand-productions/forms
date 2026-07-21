@@ -15,6 +15,7 @@ import {
   findDuplicateNames,
   fromSchema,
   isStep,
+  mergeSchema,
   retypeNode,
   toRenderSchema,
   toSchema,
@@ -209,13 +210,82 @@ async function generate() {
     formName.value = result.name ?? formName.value
     generateState.value = {
       status: 'done',
-      message: `Generated ${nodes.value.filter((n) => !isStep(n)).length} fields.`,
+      message: `Generated ${fieldCount(nodes.value)} fields.`,
     }
     // A successful generation is the end of page 1's job; carry the user to the
     // fields rather than leaving them on a prompt box that has already run.
     goTo(2)
   } catch (err) {
     generateState.value = { status: 'error', message: err.message }
+  }
+}
+
+/**
+ * The second prompt: an instruction that changes the form in place.
+ *
+ * Lives on the Build page rather than beside the first one, because the whole
+ * point is watching the change land on the canvas. The two are not variants of
+ * one control — page 1 answers "what form?" and replaces everything, this
+ * answers "what about it?" and keeps everything it wasn't asked about.
+ */
+const refinePrompt = ref('')
+const refineState = ref({ status: 'idle', message: '' })
+
+function fieldCount(list) {
+  return list.filter((n) => !isStep(n)).length
+}
+
+/** Field count is all we can report cheaply; an edit in place says so honestly. */
+function describeRefinement(before, after) {
+  const delta = after - before
+  if (delta > 0) return `Added ${delta} field${delta === 1 ? '' : 's'}.`
+  if (delta < 0) return `Removed ${-delta} field${delta === -1 ? '' : 's'}.`
+  return 'Form updated.'
+}
+
+async function refine() {
+  if (!refinePrompt.value.trim() || !nodes.value.length) return
+
+  refineState.value = { status: 'working', message: 'Applying…' }
+  const before = fieldCount(nodes.value)
+
+  try {
+    const res = await fetch(apiUrl('/forms/refine'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // The current form goes up with the instruction — the server holds nothing
+      // between calls, so this is the only thing that makes an edit an edit.
+      body: JSON.stringify({
+        prompt: refinePrompt.value,
+        name: formName.value,
+        schema: schema.value,
+      }),
+    })
+
+    if (!res.ok) {
+      const problem = await res.json().catch(() => null)
+      throw new Error(problem?.detail ?? `HTTP ${res.status}`)
+    }
+
+    const result = await res.json()
+    nodes.value = mergeSchema(nodes.value, result.schema)
+    formName.value = result.name ?? formName.value
+
+    // Usually a no-op thanks to the uid merge, but the selected field may have
+    // been the very thing the instruction removed.
+    if (!nodes.value.some((n) => n._uid === selectedUid.value)) {
+      selectedUid.value = nodes.value.find((n) => !isStep(n))?._uid ?? null
+    }
+
+    // An instruction is spent once applied. Leaving it in the box invites a
+    // second click that would apply "add a phone number" all over again.
+    refinePrompt.value = ''
+    refineState.value = {
+      status: 'done',
+      message: describeRefinement(before, fieldCount(nodes.value)),
+    }
+  } catch (err) {
+    refineState.value = { status: 'error', message: err.message }
   }
 }
 
@@ -290,7 +360,10 @@ function handleSubmit(data) {
       >
         {{ generateState.message }}
       </p>
-        <p class="hint">Replaces the current fields. Everything stays editable.</p>
+        <p class="hint">
+          Replaces the current fields. Everything stays editable — and to change a
+          form you already have, use Refine on the Build step instead.
+        </p>
       </section>
 
       <div class="page-nav">
@@ -308,6 +381,42 @@ function handleSubmit(data) {
     -->
     <div v-show="page === 2" class="page builder">
       <div class="sidebar">
+        <!-- The second prompt: edits what's on the canvas instead of replacing it -->
+        <section class="panel ai">
+          <h2>Refine with AI</h2>
+          <textarea
+            v-model="refinePrompt"
+            rows="3"
+            data-testid="refine-prompt"
+            placeholder="Describe a change — e.g. “add a phone number beside the email” or “make the budget field optional”"
+          ></textarea>
+          <button
+            type="button"
+            class="primary"
+            data-testid="refine-apply"
+            :disabled="refineState.status === 'working' || !refinePrompt.trim() || !nodes.length"
+            @click="refine"
+          >
+            {{ refineState.status === 'working' ? 'Applying…' : 'Apply change' }}
+          </button>
+          <p
+            v-if="refineState.message"
+            :class="refineState.status === 'error' ? 'error' : 'ok'"
+            data-testid="refine-status"
+          >
+            {{ refineState.message }}
+          </p>
+          <p class="hint">
+            <template v-if="nodes.length">
+              Changes the fields below rather than replacing them. Anything the
+              instruction doesn't mention is left alone.
+            </template>
+            <template v-else>
+              Add a field first — this edits a form, it doesn't start one.
+            </template>
+          </p>
+        </section>
+
         <!-- Palette -->
         <section class="panel">
       <h2>Add field</h2>

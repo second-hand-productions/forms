@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace forms.Models;
@@ -6,6 +7,25 @@ public class GenerateFormRequest
 {
     /// <summary>Natural-language description of the form the user wants.</summary>
     public string? Prompt { get; set; }
+}
+
+/// <summary>
+/// A change to make to a form that already exists.
+///
+/// Carries the current form as well as the instruction: generation is stateless
+/// — nothing is persisted until save — so the only way the model can edit rather
+/// than replace is for the client to send back what it currently has.
+/// </summary>
+public class RefineFormRequest
+{
+    /// <summary>Natural-language description of the change, e.g. "add a phone number".</summary>
+    public string? Prompt { get; set; }
+
+    /// <summary>The form's current name, returned unchanged unless the prompt asks otherwise.</summary>
+    public string? Name { get; set; }
+
+    /// <summary>The form as it stands, in the same FormKit shape a save would send.</summary>
+    public JsonElement? Schema { get; set; }
 }
 
 /// <summary>

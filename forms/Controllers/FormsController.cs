@@ -23,11 +23,7 @@ public class FormsController(IFormStore store, IFormSchemaGenerator? generator =
     {
         if (generator is null)
         {
-            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
-            {
-                Title = "Generation unavailable",
-                Detail = "No Anthropic API key is configured on the server.",
-            });
+            return GenerationUnavailable();
         }
 
         var result = await generator.GenerateAsync(request.Prompt ?? string.Empty, cancellationToken);
@@ -39,6 +35,63 @@ public class FormsController(IFormStore store, IFormSchemaGenerator? generator =
 
         return Ok(new { name = result.Name, schema = result.Schema });
     }
+
+    /// <summary>
+    /// Applies a natural-language change to a form the caller already has.
+    ///
+    /// Same contract as <see cref="Generate"/> — a whole form back, for review,
+    /// not persisted. The difference is upstream: the current schema goes with the
+    /// prompt, so the model edits it instead of starting over.
+    /// </summary>
+    [HttpPost("refine")]
+    public async Task<IActionResult> Refine(
+        [FromBody] RefineFormRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (generator is null)
+        {
+            return GenerationUnavailable();
+        }
+
+        if (request.Schema is null)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Refinement failed",
+                Detail = "The current schema is required.",
+            });
+        }
+
+        var name = request.Name?.Trim() ?? string.Empty;
+        if (name.Length > MaxNameLength)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Refinement failed",
+                Detail = $"Name may not exceed {MaxNameLength} characters.",
+            });
+        }
+
+        var result = await generator.RefineAsync(
+            request.Prompt ?? string.Empty,
+            name,
+            request.Schema.Value,
+            cancellationToken);
+
+        if (!result.Success)
+        {
+            return BadRequest(new ProblemDetails { Title = "Refinement failed", Detail = result.Error });
+        }
+
+        return Ok(new { name = result.Name, schema = result.Schema });
+    }
+
+    private ObjectResult GenerationUnavailable() =>
+        StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+        {
+            Title = "Generation unavailable",
+            Detail = "No Anthropic API key is configured on the server.",
+        });
 
     [HttpGet]
     public ActionResult<IEnumerable<FormDefinition>> GetAll() => Ok(store.GetAll());

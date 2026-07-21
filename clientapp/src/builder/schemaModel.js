@@ -102,6 +102,36 @@ export function fromSchema(schema) {
   return nodes
 }
 
+/**
+ * fromSchema, but reusing the `_uid` of the node each returned field came from.
+ *
+ * A refinement returns the whole form, most of which is the form that was sent.
+ * Replacing outright would mint new uids for every field, and identity is what
+ * the selection, the canvas keys and the preview key are all built on — so an
+ * edit that touched one field would deselect the user's field and remount every
+ * card. Matching on `name` recovers that: a field the model left alone keeps the
+ * identity it had, and only genuinely new fields get a new uid.
+ *
+ * Names are matched in order, and per kind, because they are only unique within
+ * a step — two steps may each carry an `email`, and they should map onto the
+ * same two nodes they came from rather than both onto the first.
+ */
+export function mergeSchema(currentNodes, schema) {
+  const available = new Map()
+
+  for (const node of currentNodes) {
+    const key = `${node._kind}:${node.name}`
+    const queue = available.get(key)
+    if (queue) queue.push(node._uid)
+    else available.set(key, [node._uid])
+  }
+
+  return fromSchema(schema).map((node) => {
+    const uid = available.get(`${node._kind}:${node.name}`)?.shift()
+    return uid ? { ...node, _uid: uid } : node
+  })
+}
+
 function stripEditorProps(node) {
   const { _uid, _kind, ...rest } = node
   return rest
