@@ -60,6 +60,7 @@ public class ClaudeFormSchemaGenerator(
     [
         "rows", "cols", "min", "max", "step",
         "value", "multiple", "disabled", "id", "validationLabel",
+        "optionsLayout",
     ];
 
     /// <summary>

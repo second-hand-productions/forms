@@ -10,7 +10,7 @@ export const FIELD_TYPES = [
   { type: 'number', label: 'Number', props: ['help', 'validation', 'min', 'max', 'step'] },
   { type: 'textarea', label: 'Text area', props: ['placeholder', 'help', 'validation', 'rows'] },
   { type: 'select', label: 'Dropdown', props: ['help', 'validation', 'options'] },
-  { type: 'radio', label: 'Radio group', props: ['help', 'validation', 'options'] },
+  { type: 'radio', label: 'Radio group', props: ['help', 'validation', 'options', 'optionsLayout'] },
   { type: 'checkbox', label: 'Checkbox', props: ['help', 'validation'] },
   { type: 'date', label: 'Date', props: ['help', 'validation'] },
   { type: 'tel', label: 'Phone', props: ['placeholder', 'help', 'validation'] },
@@ -46,6 +46,23 @@ export function normalizeColumnSpan(value) {
   const span = Math.trunc(Number(value))
   if (!Number.isFinite(span) || span < 1) return DEFAULT_COLUMN_SPAN
   return Math.min(span, GRID_COLUMNS)
+}
+
+// How a radio group arranges its options. Named layouts rather than a class
+// name, for the same reason columnSpan is an integer: the server can validate a
+// closed set, and the client resolves it to a class at render time.
+export const OPTIONS_LAYOUTS = [
+  { value: 'vertical', label: 'Stacked' },
+  { value: 'horizontal', label: 'Side by side' },
+]
+
+/** A field with no layout predates the feature and stacks, as genesis does. */
+export const DEFAULT_OPTIONS_LAYOUT = 'vertical'
+
+export function normalizeOptionsLayout(value) {
+  return OPTIONS_LAYOUTS.some((layout) => layout.value === value)
+    ? value
+    : DEFAULT_OPTIONS_LAYOUT
 }
 
 // Step markers are an editor construct, not a FormKit type. They split the flat

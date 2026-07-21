@@ -47,7 +47,18 @@ public static class FormSchemaValidator
         "$formkit", "name", "label", "help", "placeholder", "validation",
         "validationLabel", "options", "value", "rows", "cols",
         "min", "max", "step", "multiple", "disabled", "id",
-        "columnSpan",
+        "columnSpan", "optionsLayout",
+    };
+
+    /// <summary>
+    /// How a radio group arranges its options. A closed set for the same reason
+    /// <c>columnSpan</c> is a bounded integer: the client resolves it to a CSS
+    /// class at render time, and a class name arriving from a client is not
+    /// something this validator could meaningfully check.
+    /// </summary>
+    private static readonly HashSet<string> AllowedOptionsLayouts = new(StringComparer.Ordinal)
+    {
+        "vertical", "horizontal",
     };
 
     /// <summary>
@@ -195,6 +206,19 @@ public static class FormSchemaValidator
                 {
                     error = $"Node {path} property \"columnSpan\" must be an integer "
                         + $"between {MinColumnSpan} and {MaxColumnSpan}.";
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (prop.Name == "optionsLayout")
+            {
+                if (prop.Value.ValueKind != JsonValueKind.String
+                    || !AllowedOptionsLayouts.Contains(prop.Value.GetString()!))
+                {
+                    error = $"Node {path} property \"optionsLayout\" must be one of: "
+                        + string.Join(", ", AllowedOptionsLayouts) + ".";
                     return false;
                 }
 

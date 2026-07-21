@@ -370,3 +370,26 @@ code {
     grid-column: 1 / -1;
   }
 }
+
+/*
+ * Radio options side by side. `optionsLayout` in the schema resolves to this
+ * class at render time (toRenderSchema), the same indirection columnSpan uses
+ * above — the stored form names a layout, never a class.
+ *
+ * Global for the same reason as the grid rules: these elements are rendered
+ * inside FormKit's own components, which a scoped stylesheet cannot reach.
+ *
+ * Genesis lays the options list out as blocks and spaces them with a margin on
+ * each option, so going horizontal means both switching the container to flex
+ * and dropping that margin — left in place it would space the wrapped rows
+ * unevenly against the row gap.
+ */
+.formkit-options.options-horizontal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.5rem;
+}
+
+.formkit-options.options-horizontal > .formkit-option {
+  margin-bottom: 0;
+}

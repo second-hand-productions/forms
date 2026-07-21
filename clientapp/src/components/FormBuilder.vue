@@ -5,8 +5,10 @@ import { useDragAndDrop } from '@formkit/drag-and-drop/vue'
 import {
   COLUMN_SPANS,
   DEFAULT_COLUMN_SPAN,
+  DEFAULT_OPTIONS_LAYOUT,
   FIELD_TYPES,
   GRID_COLUMNS,
+  OPTIONS_LAYOUTS,
   getFieldType,
 } from '../builder/fieldTypes.js'
 import {
@@ -92,31 +94,50 @@ const renderSchema = computed(() => toRenderSchema(schema.value))
 /**
  * One field, rendered on the canvas exactly as the preview renders it.
  *
- * The width is deliberately dropped: the card itself carries the col-span class
- * and is the grid item, so leaving columnSpan on the inner node would apply the
- * span twice — once to the card, once to a field already filling it.
+ * Through toRenderSchema, so that "exactly as the preview renders it" is a fact
+ * about the code rather than a promise: any prop the builder resolves at render
+ * time — today the options layout — resolves the same way in both places.
+ *
+ * The width is the one deliberate difference. columnSpan is dropped before the
+ * call and the outerClass it produces is discarded after, because the card
+ * itself carries the col-span class and is the grid item; leaving it on the
+ * inner node would apply the span twice, once to the card and once to a field
+ * already filling it.
  */
 function canvasSchema(node) {
   const { _uid, _kind, columnSpan, ...rest } = node
-  return [rest]
+  return toRenderSchema([rest]).map(({ outerClass, ...field }) => field)
 }
 
 /**
- * FormKitSchema patches positionally, so each card is keyed on the identity of
- * the field it renders. Without this a drag would leave cards showing the wrong
- * input — the same lesson the preview already learned.
+ * What has to change for FormKitSchema to rebuild a field rather than patch it.
+ *
+ * It patches positionally, so identity — uid, type, name — must be in the key or
+ * a drag leaves cards showing the wrong input.
+ *
+ * `optionsLayout` is here for a different reason: it resolves to `optionsClass`,
+ * which FormKit reads when it builds the radio's options section and then never
+ * re-reads. Left out, switching a group to side-by-side updated the stored form
+ * and changed nothing on screen until the field happened to remount for some
+ * other reason. `columnSpan` needs no such help even though it resolves to
+ * `outerClass` — that one does re-render on its own, and both were checked by
+ * removing them from this key and watching what broke.
+ *
+ * Everything else is deliberately absent. Label, help, placeholder and the
+ * options themselves patch cheaply, so ordinary typing does not tear the field
+ * down and rebuild it under the cursor.
  */
-function canvasKey(node) {
-  return `${node._uid}:${node.$formkit ?? ''}:${node.name}`
+function renderKey(node) {
+  return [
+    node._uid,
+    node._kind,
+    node.$formkit ?? '',
+    node.name,
+    node.optionsLayout ?? '',
+  ].join(':')
 }
 
-// Same lesson as the JSON pane in step 1: FormKitSchema patches positionally,
-// so the preview must remount when field identity changes. Keying on
-// uid+type+name means drags, retypes and renames all remount, while cosmetic
-// edits (label, help, placeholder) patch cheaply.
-const previewKey = computed(() =>
-  nodes.value.map((n) => `${n._uid}:${n._kind}:${n.$formkit ?? ''}:${n.name}`).join('|')
-)
+const previewKey = computed(() => nodes.value.map(renderKey).join('|'))
 
 function addField(type) {
   const node = createNode(type)
@@ -548,6 +569,19 @@ function handleSubmit(data) {
           />
         </label>
 
+        <label v-if="selectedTypeDef?.props.includes('optionsLayout')">
+          Option layout
+          <select
+            :value="selected.optionsLayout ?? DEFAULT_OPTIONS_LAYOUT"
+            data-testid="prop-options-layout"
+            @change="updateProp(selected._uid, 'optionsLayout', $event.target.value)"
+          >
+            <option v-for="layout in OPTIONS_LAYOUTS" :key="layout.value" :value="layout.value">
+              {{ layout.label }}
+            </option>
+          </select>
+        </label>
+
         <label v-if="selectedTypeDef?.props.includes('options')">
           Options (one per line, <code>value: label</code>)
           <!--
@@ -597,7 +631,7 @@ function handleSubmit(data) {
             <span v-if="isStep(node)" class="step-rule">
               Step break — {{ node.label }} <code>{{ node.name }}</code>
             </span>
-            <FormKitSchema v-else :key="canvasKey(node)" :schema="canvasSchema(node)" />
+            <FormKitSchema v-else :key="renderKey(node)" :schema="canvasSchema(node)" />
 
             <!--
               Covers the rendered field so the card reads as one draggable

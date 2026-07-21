@@ -3,6 +3,7 @@ import {
   FIELD_KIND,
   STEP_KIND,
   normalizeColumnSpan,
+  normalizeOptionsLayout,
   propsForType,
 } from './fieldTypes.js'
 
@@ -201,24 +202,33 @@ export function toSchema(nodes, { multiStepName = 'steps' } = {}) {
 /**
  * Translate the stored schema into what FormKit actually renders.
  *
- * `columnSpan` is the builder's own vocabulary — an integer the server can
- * bound. FormKit knows nothing about it, so the width becomes an `outerClass`
- * here, at the last moment. Keeping the translation on this side means the
- * stored schema stays semantic and the server never has to allowlist a class
- * string, which it could not meaningfully validate.
+ * `columnSpan` and `optionsLayout` are the builder's own vocabulary — a bounded
+ * integer and a named layout. FormKit knows nothing about either, so they become
+ * an `outerClass` and an `optionsClass` here, at the last moment. Keeping the
+ * translation on this side means the stored schema stays semantic and the server
+ * never has to allowlist a class string, which it could not meaningfully
+ * validate.
  */
 export function toRenderSchema(schema) {
   return schema.map((node) => {
-    const { columnSpan, children, ...rest } = node
+    const { columnSpan, optionsLayout, children, ...rest } = node
 
     if (children) {
       return { ...rest, children: toRenderSchema(children) }
     }
 
-    return {
+    const field = {
       ...rest,
       outerClass: `col-span-${normalizeColumnSpan(columnSpan ?? DEFAULT_COLUMN_SPAN)}`,
     }
+
+    // Only the non-default needs saying: stacked is what genesis already does,
+    // so emitting a class for it would be a no-op rule to maintain.
+    if (normalizeOptionsLayout(optionsLayout) === 'horizontal') {
+      field.optionsClass = 'options-horizontal'
+    }
+
+    return field
   })
 }
 
