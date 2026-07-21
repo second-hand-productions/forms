@@ -154,24 +154,18 @@ function updateProp(uid, key, value) {
   nodes.value = nodes.value.map((n) => (n._uid === uid ? { ...n, [key]: value } : n))
 }
 
-/** Options are edited as "value: label" lines and stored as a flat map. */
+/**
+ * Options are edited as "value: label" lines and stored as a flat map.
+ *
+ * The textarea keeps its own text rather than rendering the map, because the two
+ * are deliberately not in one-to-one correspondence: a trailing blank line, a
+ * half-typed line, and "three" versus "three: three" all parse to the same map.
+ * Text is the editable form and the map is the stored one, so the text is only
+ * overwritten when they have genuinely diverged — see the watch below.
+ */
 const optionsText = ref('')
 
-watch(
-  selected,
-  (node) => {
-    if (!node?.options) {
-      optionsText.value = ''
-      return
-    }
-    optionsText.value = Object.entries(node.options)
-      .map(([value, label]) => `${value}: ${label}`)
-      .join('\n')
-  },
-  { immediate: true }
-)
-
-function applyOptions(uid, text) {
+function parseOptions(text) {
   const options = {}
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
@@ -180,7 +174,46 @@ function applyOptions(uid, text) {
     if (!key) continue
     options[key] = rest.join(':').trim() || key
   }
-  updateProp(uid, 'options', options)
+  return options
+}
+
+function formatOptions(options) {
+  return Object.entries(options)
+    .map(([value, label]) => `${value}: ${label}`)
+    .join('\n')
+}
+
+/** Flat maps of strings, so a shallow comparison is the whole comparison. */
+function sameOptions(a, b) {
+  const keys = Object.keys(a)
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key])
+}
+
+// Fires on every keystroke, not just on selection changes: applyOptions calls
+// updateProp, which replaces the selected node, and `selected` is derived from
+// it. Rewriting the text unconditionally here is what used to make a new option
+// impossible to type — pressing Enter produced a blank line, parseOptions
+// ignored it, and the rewrite took the line away again before it could be typed
+// into; the first character of a new option then came back as "x: x" with the
+// cursor thrown to the end.
+//
+// Comparing first leaves the text alone while it still means what the map says,
+// and resyncs on the changes that genuinely come from elsewhere: selecting a
+// different field, retyping one into or out of having options, and AI
+// refinement rewriting them.
+watch(
+  selected,
+  (node) => {
+    const options = node?.options ?? {}
+    if (!sameOptions(options, parseOptions(optionsText.value))) {
+      optionsText.value = formatOptions(options)
+    }
+  },
+  { immediate: true }
+)
+
+function applyOptions(uid, text) {
+  updateProp(uid, 'options', parseOptions(text))
 }
 
 const aiPrompt = ref('')
@@ -517,10 +550,16 @@ function handleSubmit(data) {
 
         <label v-if="selectedTypeDef?.props.includes('options')">
           Options (one per line, <code>value: label</code>)
+          <!--
+            v-model for the text, but the handler reads the event rather than
+            optionsText: relying on v-model's own handler having already run
+            would make this depend on the order Vue merges the two.
+          -->
           <textarea
             v-model="optionsText"
             rows="4"
-            @input="applyOptions(selected._uid, optionsText)"
+            data-testid="prop-options"
+            @input="applyOptions(selected._uid, $event.target.value)"
           ></textarea>
         </label>
       </template>
