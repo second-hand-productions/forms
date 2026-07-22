@@ -18,6 +18,12 @@
   font: 18px/145% var(--sans);
   letter-spacing: 0.18px;
   color-scheme: light dark;
+  /*
+   * The builder page is tall enough to scroll and the other two are not, so
+   * without a reserved gutter the scrollbar appears and disappears with the
+   * page and nudges the centred layout sideways each time.
+   */
+  scrollbar-gutter: stable;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { FormKitSchema } from '@formkit/vue'
 import { useDragAndDrop } from '@formkit/drag-and-drop/vue'
 import {
@@ -79,6 +79,72 @@ const selectedTypeDef = computed(() =>
     ? getFieldType(selected.value.$formkit)
     : null
 )
+
+/**
+ * The property editor is a modal opened from the canvas, not a sidebar panel.
+ *
+ * It only ever describes one field, so it belongs beside that field rather than
+ * in a corner of the page the eye has to travel to and back for every edit.
+ *
+ * A native <dialog>: focus trapping, Esc to dismiss and an inert background all
+ * come from the platform. The element's own `open` state is the only state
+ * there is — a boolean ref mirroring it would have to be resynced on the
+ * dismissals the component never initiates, and a missed `close` event would
+ * strand the ref at true and leave the modal permanently unopenable.
+ */
+const propsDialog = ref(null)
+
+async function openProperties(uid) {
+  selectedUid.value = uid
+  // The panel's contents follow `selected`, so let the DOM catch up first:
+  // showModal() applies autofocus as it opens, and an empty dialog has nothing
+  // to apply it to.
+  await nextTick()
+  if (!propsDialog.value?.open) propsDialog.value?.showModal()
+}
+
+/** A no-op on an already-closed dialog, so callers need not check. */
+function closeProperties() {
+  propsDialog.value?.close()
+}
+
+// The field being edited can vanish from under the modal — most plausibly a
+// refinement that removes it. Nothing left to edit, so nothing left to show.
+watch(selected, (node) => {
+  if (!node) closeProperties()
+})
+
+/**
+ * Backdrop clicks are dispatched at the dialog element itself; anything inside
+ * targets the panel. The dialog carries no padding of its own, so it has no hit
+ * area that isn't backdrop.
+ */
+function onDialogClick(event) {
+  if (event.target === propsDialog.value) closeProperties()
+}
+
+/*
+ * A click only counts as "open this field" if the pointer stayed put. The drag
+ * library reorders on pointerup and the browser still fires a click on the card
+ * that moved, which would otherwise pop the modal at the end of every drag.
+ */
+const DRAG_SLOP = 5
+let pointerDownAt = null
+
+function onCardPointerDown(event) {
+  pointerDownAt = { x: event.clientX, y: event.clientY }
+}
+
+function onCardClick(uid, event) {
+  selectedUid.value = uid
+
+  const start = pointerDownAt
+  pointerDownAt = null
+  if (!start) return
+  if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > DRAG_SLOP) return
+
+  openProperties(uid)
+}
 
 const isMultiStep = computed(() => nodes.value.some(isStep))
 
@@ -492,114 +558,6 @@ function handleSubmit(data) {
         break belong to that step.
       </p>
     </section>
-
-    <!-- Property editor -->
-    <section class="panel">
-      <h2>Properties</h2>
-      <template v-if="selected">
-        <p v-if="isStep(selected)" class="hint">
-          Step break — everything below it, until the next break, forms one step.
-        </p>
-
-        <label v-else>
-          Type
-          <select
-            :value="selected.$formkit"
-            @change="changeType(selected._uid, $event.target.value)"
-          >
-            <option v-for="f in FIELD_TYPES" :key="f.type" :value="f.type">
-              {{ f.label }}
-            </option>
-          </select>
-        </label>
-
-        <label v-if="!isStep(selected)">
-          Width
-          <select
-            :value="selected.columnSpan ?? DEFAULT_COLUMN_SPAN"
-            data-testid="prop-width"
-            @change="updateProp(selected._uid, 'columnSpan', Number($event.target.value))"
-          >
-            <option v-for="option in COLUMN_SPANS" :key="option.span" :value="option.span">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-
-        <label>
-          Name
-          <input
-            :value="selected.name"
-            data-testid="prop-name"
-            @input="updateProp(selected._uid, 'name', $event.target.value)"
-          />
-        </label>
-
-        <label>
-          Label
-          <input
-            :value="selected.label"
-            data-testid="prop-label"
-            @input="updateProp(selected._uid, 'label', $event.target.value)"
-          />
-        </label>
-
-        <label v-if="selectedTypeDef?.props.includes('placeholder')">
-          Placeholder
-          <input
-            :value="selected.placeholder ?? ''"
-            @input="updateProp(selected._uid, 'placeholder', $event.target.value)"
-          />
-        </label>
-
-        <label v-if="selectedTypeDef?.props.includes('help')">
-          Help text
-          <input
-            :value="selected.help ?? ''"
-            @input="updateProp(selected._uid, 'help', $event.target.value)"
-          />
-        </label>
-
-        <label v-if="selectedTypeDef?.props.includes('validation')">
-          Validation
-          <input
-            :value="selected.validation ?? ''"
-            placeholder="required|email"
-            @input="updateProp(selected._uid, 'validation', $event.target.value)"
-          />
-        </label>
-
-        <label v-if="selectedTypeDef?.props.includes('optionsLayout')">
-          Option layout
-          <select
-            :value="selected.optionsLayout ?? DEFAULT_OPTIONS_LAYOUT"
-            data-testid="prop-options-layout"
-            @change="updateProp(selected._uid, 'optionsLayout', $event.target.value)"
-          >
-            <option v-for="layout in OPTIONS_LAYOUTS" :key="layout.value" :value="layout.value">
-              {{ layout.label }}
-            </option>
-          </select>
-        </label>
-
-        <label v-if="selectedTypeDef?.props.includes('options')">
-          Options (one per line, <code>value: label</code>)
-          <!--
-            v-model for the text, but the handler reads the event rather than
-            optionsText: relying on v-model's own handler having already run
-            would make this depend on the order Vue merges the two.
-          -->
-          <textarea
-            v-model="optionsText"
-            rows="4"
-            data-testid="prop-options"
-            @input="applyOptions(selected._uid, $event.target.value)"
-          ></textarea>
-        </label>
-      </template>
-      <p v-else class="hint">Select a field to edit it.</p>
-    </section>
-
       </div>
 
       <div class="main">
@@ -607,8 +565,9 @@ function handleSubmit(data) {
       <section class="panel canvas-panel">
         <h2>Fields</h2>
         <p class="hint">
-          Drag a field to move it. Widths are set under Properties; a field that
-          no longer fits its row wraps onto the next one.
+          Drag a field to move it, or click it to edit its properties. Widths are
+          set there too; a field that no longer fits its row wraps onto the next
+          one.
         </p>
         <ul ref="listRef" class="field-canvas">
           <li
@@ -626,7 +585,8 @@ function handleSubmit(data) {
               },
             ]"
             :data-uid="node._uid"
-            @click="selectedUid = node._uid"
+            @pointerdown="onCardPointerDown"
+            @click="onCardClick(node._uid, $event)"
           >
             <span v-if="isStep(node)" class="step-rule">
               Step break — {{ node.label }} <code>{{ node.name }}</code>
@@ -641,14 +601,29 @@ function handleSubmit(data) {
             -->
             <span class="canvas-shield"></span>
 
-            <button
-              type="button"
-              class="remove"
-              :aria-label="`Remove ${node.label}`"
-              @click.stop="removeField(node._uid)"
-            >
-              ×
-            </button>
+            <!--
+              Above the shield, or they could not be clicked. The pencil is the
+              keyboard route to the properties the card opens on click, since
+              the card itself is a list item and takes no focus.
+            -->
+            <span class="card-tools">
+              <button
+                type="button"
+                class="edit"
+                :aria-label="`Edit ${node.label}`"
+                @click.stop="openProperties(node._uid)"
+              >
+                ✎
+              </button>
+              <button
+                type="button"
+                class="remove"
+                :aria-label="`Remove ${node.label}`"
+                @click.stop="removeField(node._uid)"
+              >
+                ×
+              </button>
+            </span>
           </li>
         </ul>
         <p v-if="!nodes.length" class="hint">Add a field to start laying out.</p>
@@ -725,6 +700,149 @@ function handleSubmit(data) {
         <button type="button" class="ghost" @click="goTo(2)">← Back to build</button>
       </div>
     </div>
+
+    <!--
+      The property editor for whichever field was clicked. A sibling of the
+      pages rather than a child of the builder: v-show leaves display:none on
+      the page it hides, and that would take an open dialog down with it,
+      top layer or not.
+    -->
+    <dialog
+      ref="propsDialog"
+      class="props-dialog"
+      data-testid="props-dialog"
+      @click="onDialogClick"
+    >
+      <div v-if="selected" class="props-panel">
+        <header class="props-header">
+          <h2>{{ isStep(selected) ? 'Step break' : 'Field' }} properties</h2>
+          <button
+            type="button"
+            class="close"
+            aria-label="Close properties"
+            data-testid="props-close"
+            @click="closeProperties"
+          >
+            ×
+          </button>
+        </header>
+
+        <div class="props-body">
+          <p v-if="isStep(selected)" class="hint">
+            Step break — everything below it, until the next break, forms one step.
+          </p>
+
+          <label v-else>
+            Type
+            <select
+              :value="selected.$formkit"
+              @change="changeType(selected._uid, $event.target.value)"
+            >
+              <option v-for="f in FIELD_TYPES" :key="f.type" :value="f.type">
+                {{ f.label }}
+              </option>
+            </select>
+          </label>
+
+          <label v-if="!isStep(selected)">
+            Width
+            <select
+              :value="selected.columnSpan ?? DEFAULT_COLUMN_SPAN"
+              data-testid="prop-width"
+              @change="updateProp(selected._uid, 'columnSpan', Number($event.target.value))"
+            >
+              <option v-for="option in COLUMN_SPANS" :key="option.span" :value="option.span">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+
+          <label>
+            Name
+            <!-- Opens focused here: renaming is what brings people in. -->
+            <input
+              autofocus
+              :value="selected.name"
+              data-testid="prop-name"
+              @input="updateProp(selected._uid, 'name', $event.target.value)"
+            />
+          </label>
+
+          <label>
+            Label
+            <input
+              :value="selected.label"
+              data-testid="prop-label"
+              @input="updateProp(selected._uid, 'label', $event.target.value)"
+            />
+          </label>
+
+          <label v-if="selectedTypeDef?.props.includes('placeholder')">
+            Placeholder
+            <input
+              :value="selected.placeholder ?? ''"
+              @input="updateProp(selected._uid, 'placeholder', $event.target.value)"
+            />
+          </label>
+
+          <label v-if="selectedTypeDef?.props.includes('help')">
+            Help text
+            <input
+              :value="selected.help ?? ''"
+              @input="updateProp(selected._uid, 'help', $event.target.value)"
+            />
+          </label>
+
+          <label v-if="selectedTypeDef?.props.includes('validation')">
+            Validation
+            <input
+              :value="selected.validation ?? ''"
+              placeholder="required|email"
+              @input="updateProp(selected._uid, 'validation', $event.target.value)"
+            />
+          </label>
+
+          <label v-if="selectedTypeDef?.props.includes('optionsLayout')">
+            Option layout
+            <select
+              :value="selected.optionsLayout ?? DEFAULT_OPTIONS_LAYOUT"
+              data-testid="prop-options-layout"
+              @change="updateProp(selected._uid, 'optionsLayout', $event.target.value)"
+            >
+              <option v-for="layout in OPTIONS_LAYOUTS" :key="layout.value" :value="layout.value">
+                {{ layout.label }}
+              </option>
+            </select>
+          </label>
+
+          <label v-if="selectedTypeDef?.props.includes('options')">
+            Options (one per line, <code>value: label</code>)
+            <!--
+              v-model for the text, but the handler reads the event rather than
+              optionsText: relying on v-model's own handler having already run
+              would make this depend on the order Vue merges the two.
+            -->
+            <textarea
+              v-model="optionsText"
+              rows="4"
+              data-testid="prop-options"
+              @input="applyOptions(selected._uid, $event.target.value)"
+            ></textarea>
+          </label>
+        </div>
+
+        <footer class="props-footer">
+          <button
+            type="button"
+            class="ghost"
+            data-testid="props-done"
+            @click="closeProperties"
+          >
+            Done
+          </button>
+        </footer>
+      </div>
+    </dialog>
   </div>
 </template>
 
@@ -907,9 +1025,10 @@ h2 {
   min-height: 3rem;
 }
 
+/* Room on the right for the two card tools, which sit over the padding. */
 .canvas-card {
   position: relative;
-  padding: 0.5rem 1.5rem 0.5rem 0.6rem;
+  padding: 0.5rem 2.9rem 0.5rem 0.6rem;
   border: 1px dashed transparent;
   border-radius: 4px;
   cursor: grab;
@@ -966,30 +1085,54 @@ h2 {
   z-index: 1;
 }
 
-.remove {
+.edit,
+.remove,
+.close {
+  padding: 0;
   border: none;
   background: none;
-  font-size: 1.1rem;
-  cursor: pointer;
+  line-height: 1;
   color: #999;
+  cursor: pointer;
+}
+
+.edit {
+  font-size: 0.9rem;
+}
+
+.remove,
+.close {
+  font-size: 1.1rem;
+}
+
+.edit:hover {
+  color: #2b56b5;
 }
 
 .remove:hover {
   color: #b00020;
 }
 
-/* Above the shield, or it could not be clicked. */
-.canvas-card .remove {
+.close:hover {
+  color: #333;
+}
+
+/* Above the shield, or they could not be clicked. */
+.card-tools {
   position: absolute;
-  top: 0.25rem;
-  right: 0.25rem;
+  top: 0.3rem;
+  right: 0.35rem;
   z-index: 2;
-  line-height: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   opacity: 0;
 }
 
-.canvas-card:hover .remove,
-.canvas-card.selected .remove {
+/* focus-within, or the pencil would be unreachable by keyboard. */
+.canvas-card:hover .card-tools,
+.canvas-card.selected .card-tools,
+.card-tools:focus-within {
   opacity: 1;
 }
 
@@ -1015,6 +1158,59 @@ label textarea {
 .primary {
   padding: 0.45rem 0.9rem;
   cursor: pointer;
+}
+
+/*
+ * No padding on the dialog itself: the panel inside carries it, so every pixel
+ * of the dialog's own box is backdrop and onDialogClick can tell the two apart
+ * by event target alone.
+ */
+.props-dialog {
+  width: min(28rem, calc(100vw - 2rem));
+  padding: 0;
+  color: inherit;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+}
+
+.props-dialog::backdrop {
+  background: rgba(20, 22, 30, 0.35);
+}
+
+/* The body scrolls rather than the dialog, so header and Done stay put. */
+.props-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+}
+
+.props-header,
+.props-footer {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+}
+
+.props-header {
+  justify-content: space-between;
+  border-bottom: 1px solid #eee;
+}
+
+.props-header h2 {
+  margin: 0;
+}
+
+.props-footer {
+  justify-content: flex-end;
+  border-top: 1px solid #eee;
+}
+
+.props-body {
+  padding: 1rem 1rem 0.4rem;
+  overflow-y: auto;
 }
 
 .hint {

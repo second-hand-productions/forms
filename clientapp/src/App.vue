@@ -14,10 +14,19 @@ import FormBuilder from './components/FormBuilder.vue'
 </template>
 
 <style scoped>
+/*
+ * width + border-box rather than letting the flex parent size this: #app is a
+ * column flex container, and `margin: 0 auto` on a flex item suppresses the
+ * cross-axis stretch, so main would shrink-wrap its content and re-centre on
+ * every page change — the narrow describe and review pages sat further right
+ * than the full-width builder.
+ */
 main {
+  width: 100%;
   max-width: 80rem;
   margin: 0 auto;
   padding: 2rem;
+  box-sizing: border-box;
   text-align: left;
 }
 
