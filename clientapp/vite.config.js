@@ -15,6 +15,18 @@ export default defineConfig(({ mode }) => {
     // build time, so it must match app.UsePathBase in forms/Program.cs.
     base: '/forms/',
     plugins: [vue()],
+    // TipTap/ProseMirror break at runtime ("RangeError: Adding different
+    // instances of a keyed plugin") if more than one copy of a prosemirror
+    // package is bundled. Force a single instance of each.
+    resolve: {
+      dedupe: [
+        '@tiptap/pm',
+        'prosemirror-state',
+        'prosemirror-model',
+        'prosemirror-view',
+        'prosemirror-transform',
+      ],
+    },
     server: {
       // Honour PORT so more than one dev server can run side by side.
       port: Number(process.env.PORT) || 5173,

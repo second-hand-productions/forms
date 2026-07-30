@@ -11,6 +11,9 @@ builder.Services.AddControllers();
 // Replace with a database-backed IFormStore when the POC graduates.
 builder.Services.AddSingleton<IFormStore, InMemoryFormStore>();
 
+// Report templates: same in-memory POC persistence as forms above.
+builder.Services.AddSingleton<IReportTemplateStore, InMemoryReportTemplateStore>();
+
 // AI generation is optional — the app runs fully without a key, and the
 // /api/forms/generate endpoint reports 503 rather than the app failing to start.
 // Supply the key out-of-band, never in source control:
@@ -23,6 +26,7 @@ if (!string.IsNullOrWhiteSpace(anthropicApiKey))
 {
     builder.Services.AddSingleton(new AnthropicClient { ApiKey = anthropicApiKey });
     builder.Services.AddSingleton<IFormSchemaGenerator, ClaudeFormSchemaGenerator>();
+    builder.Services.AddSingleton<IReportTemplateGenerator, ClaudeReportTemplateGenerator>();
 }
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();

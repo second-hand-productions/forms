@@ -12,11 +12,15 @@ public class FormsController(IFormStore store, IFormSchemaGenerator? generator =
     private const int MaxNameLength = 200;
 
     /// <summary>
-    /// Generates a schema from a natural-language prompt. Returns the schema for
-    /// the user to review and edit — it is deliberately not persisted here, so a
-    /// generation is a starting point rather than a saved form.
+    /// Generates a schema from a natural-language prompt, an attached image/PDF of
+    /// an existing form, or both. Returns the schema for the user to review and
+    /// edit — it is deliberately not persisted here, so a generation is a starting
+    /// point rather than a saved form.
     /// </summary>
+    // Attachments push the JSON body past Kestrel's 30 MB default (a 20 MB PDF is
+    // ~27 MB once base64-encoded), so this endpoint alone is allowed more.
     [HttpPost("generate")]
+    [RequestSizeLimit(40_000_000)]
     public async Task<IActionResult> Generate(
         [FromBody] GenerateFormRequest request,
         CancellationToken cancellationToken)
@@ -26,7 +30,14 @@ public class FormsController(IFormStore store, IFormSchemaGenerator? generator =
             return GenerationUnavailable();
         }
 
-        var result = await generator.GenerateAsync(request.Prompt ?? string.Empty, cancellationToken);
+        if (!GenerationAttachmentReader.TryRead(
+                request.FileData, request.FileMediaType, out var attachment, out var attachmentError))
+        {
+            return BadRequest(new ProblemDetails { Title = "Invalid attachment", Detail = attachmentError });
+        }
+
+        var result = await generator.GenerateAsync(
+            request.Prompt ?? string.Empty, attachment, cancellationToken);
 
         if (!result.Success)
         {

@@ -23,6 +23,25 @@ public class ClaudeFormSchemaGenerator(
     private const int MaxPromptLength = 2_000;
 
     /// <summary>
+    /// Image media types the model accepts, mapped to the SDK enum. A form photo
+    /// or screenshot is one of these; anything else is rejected before the call.
+    /// </summary>
+    private static readonly Dictionary<string, MediaType> ImageMediaTypes = new()
+    {
+        ["image/png"] = MediaType.ImagePng,
+        ["image/jpeg"] = MediaType.ImageJpeg,
+        ["image/gif"] = MediaType.ImageGif,
+        ["image/webp"] = MediaType.ImageWebP,
+    };
+
+    private const string PdfMediaType = "application/pdf";
+
+    // Caps mirror the Anthropic API's own limits, checked here so an oversize
+    // upload fails fast with a clear message rather than as a provider error.
+    private const int MaxImageBytes = 5 * 1024 * 1024;
+    private const int MaxPdfBytes = 20 * 1024 * 1024;
+
+    /// <summary>
     /// Mirrors the client palette in clientapp/src/builder/fieldTypes.js and is a
     /// subset of the validator's allowlist. Constraining generation to this set
     /// means a well-formed generation is also a valid save.
@@ -104,6 +123,20 @@ public class ClaudeFormSchemaGenerator(
 
         - Prefer the smallest set of fields that actually satisfies the request. Do not invent
           fields the user did not ask for or imply.
+
+        When an image or PDF of an existing form is attached, transcribe it into fields:
+        - Recreate every input the form asks for, in the order it appears. Use the form's own
+          printed labels. Read section headings and page breaks as step boundaries only when the
+          form is genuinely long or clearly staged.
+        - Map each control to the closest allowed type: a write-in line is text (or textarea when
+          it spans multiple lines), a set of checkboxes or radio buttons is radio/checkbox/select,
+          a date line is date, and so on. Copy the printed choices into `options`.
+        - Infer `validation` from the page: fields marked required or starred get "required";
+          an email, phone or date line gets the matching rule.
+        - Mirror the visual layout with `columnSpan`: inputs printed side by side on one line
+          should share a row, full-width lines stay 12.
+        - Any accompanying text instruction refines or overrides what you see — follow it over the
+          page when they conflict.
         """;
 
     /// <summary>
@@ -142,14 +175,28 @@ public class ClaudeFormSchemaGenerator(
     /// <summary>Indented so the current form reads as structure in the prompt, not as one long line.</summary>
     private static readonly JsonSerializerOptions PromptJson = new() { WriteIndented = true };
 
-    public Task<GenerationResult> GenerateAsync(string prompt, CancellationToken cancellationToken)
+    public Task<GenerationResult> GenerateAsync(
+        string prompt,
+        GenerationAttachment? attachment,
+        CancellationToken cancellationToken)
     {
-        if (!TryValidatePrompt(prompt, out var promptError))
+        var hasPrompt = !string.IsNullOrWhiteSpace(prompt);
+
+        // A prompt or an attachment is enough on its own — the attachment carries
+        // the form to transcribe when the prompt is empty.
+        if (!hasPrompt && attachment is null)
         {
-            return Task.FromResult(GenerationResult.Fail(promptError));
+            return Task.FromResult(
+                GenerationResult.Fail("Describe the form, or attach an image or PDF of one."));
         }
 
-        return RunAsync(SystemPrompt, prompt, "Generated form", carryOver: null, cancellationToken);
+        if (hasPrompt && prompt.Length > MaxPromptLength)
+        {
+            return Task.FromResult(
+                GenerationResult.Fail($"Prompt may not exceed {MaxPromptLength} characters."));
+        }
+
+        return RunAsync(SystemPrompt, prompt, attachment, "Generated form", carryOver: null, cancellationToken);
     }
 
     public Task<GenerationResult> RefineAsync(
@@ -188,7 +235,8 @@ public class ClaudeFormSchemaGenerator(
         // Fall back to the current name, not a generic one: an edit that says
         // nothing about naming should leave the name alone.
         var fallbackName = string.IsNullOrWhiteSpace(currentName) ? "Generated form" : currentName;
-        return RunAsync(RefineSystemPrompt, message, fallbackName, BuildCarryOver(currentSchema), cancellationToken);
+        return RunAsync(
+            RefineSystemPrompt, message, attachment: null, fallbackName, BuildCarryOver(currentSchema), cancellationToken);
     }
 
     /// <summary>
@@ -264,10 +312,18 @@ public class ClaudeFormSchemaGenerator(
     private async Task<GenerationResult> RunAsync(
         string systemPrompt,
         string userMessage,
+        GenerationAttachment? attachment,
         string fallbackName,
         IReadOnlyDictionary<string, JsonElement>? carryOver,
         CancellationToken cancellationToken)
     {
+        // A refine has no attachment, so this is just a text block; a generation
+        // may prepend an image/document block. Media type and size are checked here.
+        if (!TryBuildContent(userMessage, attachment, out var content, out var contentError))
+        {
+            return GenerationResult.Fail(contentError);
+        }
+
         GeneratedForm? generated;
         try
         {
@@ -283,7 +339,7 @@ public class ClaudeFormSchemaGenerator(
                         Format = new JsonOutputFormat { Schema = BuildOutputSchema() },
                     },
                     System = systemPrompt,
-                    Messages = [new() { Role = Role.User, Content = userMessage }],
+                    Messages = [new() { Role = Role.User, Content = content }],
                 },
                 cancellationToken);
 
@@ -440,6 +496,68 @@ public class ClaudeFormSchemaGenerator(
         && value.ValueKind == JsonValueKind.String
             ? value.GetString()!
             : string.Empty;
+
+    /// <summary>
+    /// Builds the user message. An attached image/PDF becomes an image or document
+    /// block; a text block — the user's prompt, or a default instruction when only
+    /// a file was sent — always follows it. Media type and size are validated here,
+    /// so an unsupported or oversize file fails before the provider call.
+    /// </summary>
+    private static bool TryBuildContent(
+        string prompt,
+        GenerationAttachment? attachment,
+        out List<ContentBlockParam> content,
+        out string error)
+    {
+        content = [];
+        error = string.Empty;
+
+        if (attachment is not null)
+        {
+            if (attachment.MediaType == PdfMediaType)
+            {
+                if (attachment.Data.Length > MaxPdfBytes)
+                {
+                    error = $"The PDF may not exceed {MaxPdfBytes / (1024 * 1024)} MB.";
+                    return false;
+                }
+
+                content.Add(new DocumentBlockParam
+                {
+                    Source = new Base64PdfSource { Data = Convert.ToBase64String(attachment.Data) },
+                });
+            }
+            else if (ImageMediaTypes.TryGetValue(attachment.MediaType, out var mediaType))
+            {
+                if (attachment.Data.Length > MaxImageBytes)
+                {
+                    error = $"The image may not exceed {MaxImageBytes / (1024 * 1024)} MB.";
+                    return false;
+                }
+
+                content.Add(new ImageBlockParam
+                {
+                    Source = new Base64ImageSource
+                    {
+                        Data = Convert.ToBase64String(attachment.Data),
+                        MediaType = mediaType,
+                    },
+                });
+            }
+            else
+            {
+                error = "Attach a PNG, JPEG, GIF or WebP image, or a PDF.";
+                return false;
+            }
+        }
+
+        var text = string.IsNullOrWhiteSpace(prompt)
+            ? "Recreate this form. Transcribe every field it asks for."
+            : prompt;
+        content.Add(new TextBlockParam { Text = text });
+
+        return true;
+    }
 
     /// <summary>
     /// Assembles the FormKit schema. Flat when there are no step boundaries;

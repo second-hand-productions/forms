@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, onMounted, nextTick, ref, watch } from 'vue'
 import { FormKitSchema } from '@formkit/vue'
 import { useDragAndDrop } from '@formkit/drag-and-drop/vue'
 import {
@@ -69,6 +69,47 @@ const selectedUid = ref(nodes.value[0]?._uid ?? null)
 const formName = ref('Untitled form')
 const saveState = ref({ status: 'idle', message: '' })
 const submitted = ref(null)
+
+// Saved forms available to reopen, and which one (if any) is currently loaded.
+// currentFormId set means a save updates that form rather than creating a new
+// one — the same identity dance the report builder does with currentTemplateId.
+const savedForms = ref([]) // {id, name, schema} from GET /api/forms
+const openFormId = ref('') // bound to the "Open a saved form" picker
+const currentFormId = ref(null)
+
+onMounted(loadForms)
+
+async function loadForms() {
+  try {
+    const res = await fetch(apiUrl('/forms'))
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    savedForms.value = await res.json()
+  } catch {
+    savedForms.value = []
+  }
+}
+
+async function openForm() {
+  const id = openFormId.value
+  if (!id) return
+  try {
+    const res = await fetch(apiUrl(`/forms/${id}`))
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const form = await res.json()
+    // Loaded forms land in the same editable canvas as generated or hand-built
+    // ones; saving later updates this form rather than cloning it.
+    nodes.value = fromSchema(form.schema)
+    selectedUid.value = nodes.value.find((n) => !isStep(n))?._uid ?? null
+    formName.value = form.name
+    currentFormId.value = form.id
+    saveState.value = { status: 'idle', message: '' }
+    generateState.value = { status: 'idle', message: '' }
+    // Opening is the end of page 1's job; carry the user to the fields.
+    goTo(2)
+  } catch (err) {
+    saveState.value = { status: 'error', message: err.message }
+  }
+}
 
 const selected = computed(() =>
   nodes.value.find((n) => n._uid === selectedUid.value) ?? null
@@ -306,15 +347,82 @@ function applyOptions(uid, text) {
 const aiPrompt = ref('')
 const generateState = ref({ status: 'idle', message: '' })
 
+// A photo/screenshot or PDF of an existing form to transcribe. Held as
+// { name, mediaType, data } where data is base64 with no data-URL prefix — the
+// same shape the server's GenerateFormRequest expects. Caps mirror the server.
+const aiFile = ref(null)
+const fileInputRef = ref(null)
+const ACCEPTED_FILES = {
+  'image/png': 5,
+  'image/jpeg': 5,
+  'image/gif': 5,
+  'image/webp': 5,
+  'application/pdf': 20,
+}
+
+const canGenerate = computed(() => !!aiPrompt.value.trim() || !!aiFile.value)
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = String(reader.result)
+      // Drop the "data:<mime>;base64," prefix; the server wants raw base64.
+      resolve(result.slice(result.indexOf(',') + 1))
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read that file.'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function onFileChange(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+
+  const maxMb = ACCEPTED_FILES[file.type]
+  if (!maxMb) {
+    clearFile()
+    generateState.value = {
+      status: 'error',
+      message: 'Attach a PNG, JPEG, GIF or WebP image, or a PDF.',
+    }
+    return
+  }
+  if (file.size > maxMb * 1024 * 1024) {
+    clearFile()
+    const kind = file.type === 'application/pdf' ? 'PDF' : 'image'
+    generateState.value = { status: 'error', message: `That ${kind} is over ${maxMb} MB.` }
+    return
+  }
+
+  try {
+    const data = await readFileAsBase64(file)
+    aiFile.value = { name: file.name, mediaType: file.type, data }
+    generateState.value = { status: 'idle', message: '' }
+  } catch (err) {
+    clearFile()
+    generateState.value = { status: 'error', message: err.message }
+  }
+}
+
+function clearFile() {
+  aiFile.value = null
+  if (fileInputRef.value) fileInputRef.value.value = ''
+}
+
 async function generate() {
-  if (!aiPrompt.value.trim()) return
+  if (!canGenerate.value) return
 
   generateState.value = { status: 'working', message: 'Generating…' }
   try {
     const res = await fetch(apiUrl('/forms/generate'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: aiPrompt.value }),
+      body: JSON.stringify({
+        prompt: aiPrompt.value,
+        fileData: aiFile.value?.data ?? null,
+        fileMediaType: aiFile.value?.mediaType ?? null,
+      }),
     })
 
     if (!res.ok) {
@@ -324,7 +432,10 @@ async function generate() {
 
     const result = await res.json()
     // Generated forms land in the same editable model as hand-built ones —
-    // the prompt is a starting point, not a finished artifact.
+    // the prompt is a starting point, not a finished artifact. It's a new,
+    // unsaved form, so drop any opened-form identity.
+    currentFormId.value = null
+    openFormId.value = ''
     nodes.value = fromSchema(result.schema)
     selectedUid.value = nodes.value.find((n) => !isStep(n))?._uid ?? null
     formName.value = result.name ?? formName.value
@@ -411,9 +522,14 @@ async function refine() {
 
 async function save() {
   saveState.value = { status: 'saving', message: '' }
+
+  // A loaded (or previously saved) form updates in place; otherwise create one.
+  const isUpdate = Boolean(currentFormId.value)
+  const url = isUpdate ? apiUrl(`/forms/${currentFormId.value}`) : apiUrl('/forms')
+
   try {
-    const res = await fetch(apiUrl('/forms'), {
-      method: 'POST',
+    const res = await fetch(url, {
+      method: isUpdate ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: formName.value, schema: schema.value }),
     })
@@ -424,7 +540,11 @@ async function save() {
     }
 
     const saved = await res.json()
+    // Adopt the id so the next save updates rather than duplicates, and refresh
+    // the picker so a newly created form is immediately reopenable.
+    currentFormId.value = saved.id
     saveState.value = { status: 'saved', message: `Saved as ${saved.id}` }
+    await loadForms()
   } catch (err) {
     saveState.value = { status: 'error', message: err.message }
   }
@@ -464,11 +584,36 @@ function handleSubmit(data) {
         data-testid="ai-prompt"
         placeholder="Describe the form you need — e.g. “a job application with contact details, work history and a cover letter”"
       ></textarea>
+
+      <!--
+        Or hand the model a picture/PDF of an existing form to transcribe. The
+        two inputs combine: an attachment alone works, and a prompt alongside it
+        refines the result ("recreate this but drop the SSN field").
+      -->
+      <div class="ai-attach">
+        <label class="file-label">
+          <input
+            ref="fileInputRef"
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
+            data-testid="ai-file"
+            @change="onFileChange"
+          />
+          <span>Or attach a form (image or PDF)</span>
+        </label>
+        <p v-if="aiFile" class="file-chip" data-testid="ai-file-name">
+          {{ aiFile.name }}
+          <button type="button" class="file-clear" aria-label="Remove attachment" @click="clearFile">
+            ×
+          </button>
+        </p>
+      </div>
+
       <button
         type="button"
         class="primary"
         data-testid="ai-generate"
-        :disabled="generateState.status === 'working' || !aiPrompt.trim()"
+        :disabled="generateState.status === 'working' || !canGenerate"
         @click="generate"
       >
         {{ generateState.status === 'working' ? 'Generating…' : 'Generate form' }}
@@ -484,6 +629,18 @@ function handleSubmit(data) {
           Replaces the current fields. Everything stays editable — and to change a
           form you already have, use Refine on the Build step instead.
         </p>
+      </section>
+
+      <!-- Alternative starting point: reopen a saved form to edit it. -->
+      <section class="panel">
+        <h2>Or open a saved form</h2>
+        <label>
+          Saved forms
+          <select v-model="openFormId" data-testid="open-form" @change="openForm">
+            <option value="">New form…</option>
+            <option v-for="f in savedForms" :key="f.id" :value="f.id">{{ f.name }}</option>
+          </select>
+        </label>
       </section>
 
       <div class="page-nav">
@@ -685,7 +842,7 @@ function handleSubmit(data) {
           :disabled="!nodes.length || saveState.status === 'saving'"
           @click="save"
         >
-          {{ saveState.status === 'saving' ? 'Saving…' : 'Save form' }}
+          {{ saveState.status === 'saving' ? 'Saving…' : currentFormId ? 'Update form' : 'Save form' }}
         </button>
         <p
           v-if="saveState.message"
@@ -975,6 +1132,45 @@ function handleSubmit(data) {
   border-radius: 4px;
   margin-bottom: 0.5rem;
   resize: vertical;
+}
+
+.ai-attach {
+  margin-bottom: 0.6rem;
+}
+
+.file-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #444;
+}
+
+.file-label input {
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.4rem 0 0;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+  color: #2b56b5;
+  background: #eef4ff;
+  border: 1px solid #b9cdf5;
+  border-radius: 4px;
+}
+
+.file-clear {
+  border: none;
+  background: none;
+  font-size: 1rem;
+  line-height: 1;
+  color: #2b56b5;
+  cursor: pointer;
 }
 
 .primary:disabled {

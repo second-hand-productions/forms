@@ -7,6 +7,20 @@ public class GenerateFormRequest
 {
     /// <summary>Natural-language description of the form the user wants.</summary>
     public string? Prompt { get; set; }
+
+    /// <summary>
+    /// Base64-encoded image or PDF of an existing form to transcribe. Optional —
+    /// when present the model recreates the fields it sees; <see cref="Prompt"/>
+    /// then refines rather than describes. The raw base64 only, with no data-URL
+    /// prefix; <see cref="FileMediaType"/> carries the type.
+    /// </summary>
+    public string? FileData { get; set; }
+
+    /// <summary>
+    /// MIME type of <see cref="FileData"/>: image/png, image/jpeg, image/gif,
+    /// image/webp, or application/pdf. Required when FileData is present.
+    /// </summary>
+    public string? FileMediaType { get; set; }
 }
 
 /// <summary>
