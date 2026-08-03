@@ -16,6 +16,7 @@ import {
   createStep,
   findDuplicateNames,
   fromSchema,
+  groupIntoSteps,
   isStep,
   mergeSchema,
   retypeNode,
@@ -244,7 +245,30 @@ function renderKey(node) {
   ].join(':')
 }
 
-const previewKey = computed(() => nodes.value.map(renderKey).join('|'))
+// A conditional field compiles to a reactive validation expression that reads
+// its controller by id, and the controller only gains that id while something
+// references it (see toRenderSchema). Both are wired at build time and FormKit
+// does not re-read them on a patch, so — like optionsLayout in renderKey — a
+// changed condition or a field becoming/ceasing to be a controller has to force
+// a remount, or editing a condition would change the stored form and nothing on
+// screen until the preview happened to rebuild for another reason.
+const conditionKey = computed(() => {
+  const controllers = new Set()
+  for (const node of nodes.value) {
+    if (node.requiredWhen?.field) controllers.add(node.requiredWhen.field)
+  }
+
+  return nodes.value
+    .map((node) => {
+      const dep = node.requiredWhen
+        ? `${node.requiredWhen.field}=${node.requiredWhen.equals ?? ''}`
+        : ''
+      return controllers.has(node.name) ? `${dep}!` : dep
+    })
+    .join(',')
+})
+
+const previewKey = computed(() => `${nodes.value.map(renderKey).join('|')}#${conditionKey.value}`)
 
 function addField(type) {
   const node = createNode(type)
@@ -280,6 +304,76 @@ function changeType(uid, nextType) {
 
 function updateProp(uid, key, value) {
   nodes.value = nodes.value.map((n) => (n._uid === uid ? { ...n, [key]: value } : n))
+}
+
+function removeProp(uid, key) {
+  nodes.value = nodes.value.map((n) => {
+    if (n._uid !== uid) return n
+    const { [key]: _removed, ...rest } = n
+    return rest
+  })
+}
+
+/**
+ * Fields a conditional-required rule may point at: the other fields in the same
+ * step as the selected one.
+ *
+ * Scoped to the step because a field's value is only in scope within its own
+ * step group at submit time, and because two steps may reuse a name — a
+ * cross-step reference would be ambiguous about which one it meant. Steps
+ * themselves and unnamed fields are never candidates.
+ */
+const conditionCandidates = computed(() => {
+  if (!selected.value || isStep(selected.value)) return []
+
+  const group = groupIntoSteps(nodes.value).find((g) =>
+    g.fields.some((f) => f._uid === selected.value._uid)
+  )
+  const fields = group ? group.fields : nodes.value.filter((n) => !isStep(n))
+
+  return fields.filter((f) => f._uid !== selected.value._uid && (f.name ?? '').trim())
+})
+
+/** The chosen controlling field, if its name still resolves to a candidate. */
+const conditionController = computed(
+  () =>
+    conditionCandidates.value.find((f) => f.name === selected.value?.requiredWhen?.field) ?? null
+)
+
+/**
+ * When the controller is a radio or select, its option keys are the values worth
+ * offering — a free-text box would just invite a typo that silently never
+ * matches. Any other controller type falls back to a plain input.
+ */
+const conditionOptions = computed(() => {
+  const options = conditionController.value?.options
+  return options
+    ? Object.entries(options).map(([value, label]) => ({ value, label: label || value }))
+    : []
+})
+
+function setConditionField(uid, fieldName) {
+  if (!fieldName) {
+    removeProp(uid, 'requiredWhen')
+    return
+  }
+
+  // Keep any value already chosen when only the field changes; default to the
+  // controller's first option so a fresh condition is immediately meaningful.
+  const previous = selected.value?.requiredWhen
+  const carried = previous?.field === fieldName ? previous.equals : undefined
+  const firstOption = conditionCandidates.value
+    .find((f) => f.name === fieldName)
+    ?.options
+  const fallback = firstOption ? Object.keys(firstOption)[0] : ''
+
+  updateProp(uid, 'requiredWhen', { field: fieldName, equals: carried ?? fallback ?? '' })
+}
+
+function setConditionEquals(uid, value) {
+  const field = selected.value?.requiredWhen?.field
+  if (!field) return
+  updateProp(uid, 'requiredWhen', { field, equals: value })
 }
 
 /**
@@ -959,6 +1053,52 @@ function handleSubmit(data) {
             />
           </label>
 
+          <fieldset
+            v-if="selectedTypeDef?.props.includes('requiredWhen') && conditionCandidates.length"
+            class="condition"
+          >
+            <legend>Required only when</legend>
+
+            <label class="condition-row">
+              <span>Field</span>
+              <select
+                :value="selected.requiredWhen?.field ?? ''"
+                data-testid="prop-requiredwhen-field"
+                @change="setConditionField(selected._uid, $event.target.value)"
+              >
+                <option value="">Always required if “required” is set above</option>
+                <option v-for="f in conditionCandidates" :key="f._uid" :value="f.name">
+                  {{ f.label || f.name }}
+                </option>
+              </select>
+            </label>
+
+            <label v-if="selected.requiredWhen?.field" class="condition-row">
+              <span>Equals</span>
+              <select
+                v-if="conditionOptions.length"
+                :value="selected.requiredWhen?.equals ?? ''"
+                data-testid="prop-requiredwhen-equals"
+                @change="setConditionEquals(selected._uid, $event.target.value)"
+              >
+                <option v-for="o in conditionOptions" :key="o.value" :value="o.value">
+                  {{ o.label }}
+                </option>
+              </select>
+              <input
+                v-else
+                :value="selected.requiredWhen?.equals ?? ''"
+                data-testid="prop-requiredwhen-equals"
+                @input="setConditionEquals(selected._uid, $event.target.value)"
+              />
+            </label>
+
+            <p class="hint">
+              This field becomes required only when the chosen field holds that value.
+              A plain <code>required</code> in Validation is ignored while a condition is set.
+            </p>
+          </fieldset>
+
           <label v-if="selectedTypeDef?.props.includes('optionsLayout')">
             Option layout
             <select
@@ -1412,6 +1552,25 @@ label textarea {
 .hint {
   color: #888;
   font-size: 0.8rem;
+}
+
+/* Groups the conditional-required controls so they read as one setting, not
+   two stray dropdowns among the flat property list. */
+.condition {
+  margin: 0 0 0.6rem;
+  padding: 0.6rem 0.75rem 0.2rem;
+  border: 1px solid #e2e2e2;
+  border-radius: 6px;
+}
+
+.condition legend {
+  padding: 0 0.35rem;
+  font-size: 0.8rem;
+  color: #444;
+}
+
+.condition .hint {
+  margin: 0.1rem 0 0.4rem;
 }
 
 .error {

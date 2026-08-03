@@ -4,17 +4,21 @@
 // forms/Validation/FormSchemaValidator.cs. The server is the security
 // boundary; this is the UI affordance. If you add a type here it must also
 // exist there, or saving will 400.
+// `requiredWhen` is on every type for the same reason `validation` is: any field
+// can be made conditionally required. It stores a { field, equals } condition and
+// is compiled into a reactive validation expression at render time — see
+// toRenderSchema in schemaModel.js.
 export const FIELD_TYPES = [
-  { type: 'text', label: 'Text', props: ['placeholder', 'help', 'validation'] },
-  { type: 'email', label: 'Email', props: ['placeholder', 'help', 'validation'] },
-  { type: 'number', label: 'Number', props: ['help', 'validation', 'min', 'max', 'step'] },
-  { type: 'textarea', label: 'Text area', props: ['placeholder', 'help', 'validation', 'rows'] },
-  { type: 'select', label: 'Dropdown', props: ['help', 'validation', 'options'] },
-  { type: 'radio', label: 'Radio group', props: ['help', 'validation', 'options', 'optionsLayout'] },
-  { type: 'checkbox', label: 'Checkbox', props: ['help', 'validation'] },
-  { type: 'date', label: 'Date', props: ['help', 'validation'] },
-  { type: 'tel', label: 'Phone', props: ['placeholder', 'help', 'validation'] },
-  { type: 'url', label: 'URL', props: ['placeholder', 'help', 'validation'] },
+  { type: 'text', label: 'Text', props: ['placeholder', 'help', 'validation', 'requiredWhen'] },
+  { type: 'email', label: 'Email', props: ['placeholder', 'help', 'validation', 'requiredWhen'] },
+  { type: 'number', label: 'Number', props: ['help', 'validation', 'requiredWhen', 'min', 'max', 'step'] },
+  { type: 'textarea', label: 'Text area', props: ['placeholder', 'help', 'validation', 'requiredWhen', 'rows'] },
+  { type: 'select', label: 'Dropdown', props: ['help', 'validation', 'requiredWhen', 'options'] },
+  { type: 'radio', label: 'Radio group', props: ['help', 'validation', 'requiredWhen', 'options', 'optionsLayout'] },
+  { type: 'checkbox', label: 'Checkbox', props: ['help', 'validation', 'requiredWhen'] },
+  { type: 'date', label: 'Date', props: ['help', 'validation', 'requiredWhen'] },
+  { type: 'tel', label: 'Phone', props: ['placeholder', 'help', 'validation', 'requiredWhen'] },
+  { type: 'url', label: 'URL', props: ['placeholder', 'help', 'validation', 'requiredWhen'] },
 ]
 
 // Props every field carries regardless of type. columnSpan is here rather than

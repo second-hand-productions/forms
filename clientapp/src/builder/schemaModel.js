@@ -200,26 +200,101 @@ export function toSchema(nodes, { multiStepName = 'steps' } = {}) {
 }
 
 /**
+ * Every field whose `requiredWhen.field` names it, gathered from the whole tree.
+ *
+ * A conditional field references its controller by name, but FormKit's `$get`
+ * resolves a node by `id`, not by name — so a controller only becomes reachable
+ * once we give it one. We assign the id only to fields that are actually
+ * referenced, rather than to every field, to keep the id namespace as small as
+ * the feature needs it.
+ */
+function collectControllerNames(schema, into = new Set()) {
+  for (const node of schema) {
+    if (node.children) collectControllerNames(node.children, into)
+    const field = node.requiredWhen?.field
+    if (field) into.add(field)
+  }
+  return into
+}
+
+/**
+ * A field's own rules minus `required`: the part that holds whether or not the
+ * condition is met. `required` is dropped because the condition owns it — a field
+ * that is conditionally required is not unconditionally required too.
+ */
+function baseRules(validation) {
+  return (validation ?? '')
+    .split('|')
+    .map((rule) => rule.trim())
+    .filter((rule) => rule && rule !== 'required')
+}
+
+/**
+ * Compile a `requiredWhen` condition into a reactive FormKit validation string.
+ *
+ * FormKit evaluates any attribute string beginning with `$` as an expression, so
+ * the result reads its controller's live value on every change and toggles
+ * `required` on or off. Both operands are JSON-encoded, so a value containing a
+ * quote or a `|` stays a literal rather than breaking out of the expression.
+ *
+ * FormKit's expression compiler has no ternary — only `&&`, `||`, comparisons
+ * and arithmetic — so the familiar `cond ? a : b` is unavailable. The equivalent
+ * is `(cond && a) || b`: when the condition holds it yields the active rules;
+ * otherwise `&&` short-circuits to `false` and `||` falls through to the base
+ * rules. The parentheses are load-bearing — `&&` and `||` share one precedence
+ * level in the compiler, so without them the grouping is not what we mean.
+ *
+ * This is the one place a `$`-string is produced, and it is produced here — after
+ * the schema has left the server, on data the server validated as structured —
+ * never stored. That is the whole point of keeping `requiredWhen` as data.
+ */
+function conditionalValidation(validation, requiredWhen) {
+  const base = baseRules(validation)
+  const active = JSON.stringify(['required', ...base].join('|'))
+  const inactive = JSON.stringify(base.join('|'))
+  const controller = JSON.stringify(requiredWhen.field)
+
+  // No `equals` means "required whenever the controller has a truthy value".
+  const test =
+    requiredWhen.equals === undefined
+      ? `$get(${controller}).value`
+      : `$get(${controller}).value === ${JSON.stringify(requiredWhen.equals)}`
+
+  return `$: (${test} && ${active}) || ${inactive}`
+}
+
+/**
  * Translate the stored schema into what FormKit actually renders.
  *
- * `columnSpan` and `optionsLayout` are the builder's own vocabulary — a bounded
- * integer and a named layout. FormKit knows nothing about either, so they become
- * an `outerClass` and an `optionsClass` here, at the last moment. Keeping the
- * translation on this side means the stored schema stays semantic and the server
- * never has to allowlist a class string, which it could not meaningfully
- * validate.
+ * `columnSpan`, `optionsLayout` and `requiredWhen` are the builder's own
+ * vocabulary — a bounded integer, a named layout, and a structured condition.
+ * FormKit knows nothing about any of them, so they become an `outerClass`, an
+ * `optionsClass`, and a reactive `validation` expression here, at the last
+ * moment. Keeping the translation on this side means the stored schema stays
+ * semantic and the server never has to allowlist a class string or a `$`
+ * expression, neither of which it could meaningfully validate.
  */
-export function toRenderSchema(schema) {
+export function toRenderSchema(schema, controllers = collectControllerNames(schema)) {
   return schema.map((node) => {
-    const { columnSpan, optionsLayout, children, ...rest } = node
+    const { columnSpan, optionsLayout, children, requiredWhen, ...rest } = node
 
     if (children) {
-      return { ...rest, children: toRenderSchema(children) }
+      return { ...rest, children: toRenderSchema(children, controllers) }
     }
 
     const field = {
       ...rest,
       outerClass: `col-span-${normalizeColumnSpan(columnSpan ?? DEFAULT_COLUMN_SPAN)}`,
+    }
+
+    // A referenced field needs an id for $get to find it; an unreferenced one is
+    // left alone so the id namespace stays as small as the feature needs.
+    if (controllers.has(node.name)) {
+      field.id = node.name
+    }
+
+    if (requiredWhen?.field) {
+      field.validation = conditionalValidation(rest.validation, requiredWhen)
     }
 
     // Only the non-default needs saying: stacked is what genesis already does,

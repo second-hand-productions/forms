@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Anthropic;
 using Anthropic.Models.Messages;
@@ -79,7 +80,7 @@ public class ClaudeFormSchemaGenerator(
     [
         "rows", "cols", "min", "max", "step",
         "value", "multiple", "disabled", "id", "validationLabel",
-        "optionsLayout",
+        "optionsLayout", "requiredWhen",
     ];
 
     /// <summary>
@@ -327,40 +328,65 @@ public class ClaudeFormSchemaGenerator(
         GeneratedForm? generated;
         try
         {
-            var response = await client.Messages.Create(
-                new MessageCreateParams
+            var createParams = new MessageCreateParams
+            {
+                Model = Model.ClaudeOpus4_8,
+                // Room for a large form: the JSON plus adaptive-thinking tokens share
+                // this budget, and transcribing a 100+ field PDF easily exceeds a few
+                // thousand tokens. If the model still runs out, StopReason surfaces it
+                // below rather than letting a truncated document fail to deserialize.
+                MaxTokens = 32_000,
+                Thinking = new ThinkingConfigAdaptive(),
+                OutputConfig = new OutputConfig
                 {
-                    Model = Model.ClaudeOpus4_8,
-                    MaxTokens = 8_000,
-                    Thinking = new ThinkingConfigAdaptive(),
-                    OutputConfig = new OutputConfig
-                    {
-                        Effort = Effort.Medium,
-                        Format = new JsonOutputFormat { Schema = BuildOutputSchema() },
-                    },
-                    System = systemPrompt,
-                    Messages = [new() { Role = Role.User, Content = content }],
+                    Effort = Effort.Medium,
+                    Format = new JsonOutputFormat { Schema = BuildOutputSchema() },
                 },
-                cancellationToken);
+                System = systemPrompt,
+                Messages = [new() { Role = Role.User, Content = content }],
+            };
 
-            // A refusal returns a normal 200 with no usable content — check before reading.
-            if (response.StopReason == "refusal")
+            // Stream rather than block. A large form takes long enough to generate that
+            // a single non-streaming call would sit idle past the HTTP timeout; streaming
+            // keeps bytes flowing. We reassemble the text deltas into the same JSON a
+            // non-streaming call would have returned, and read StopReason off the final
+            // message delta.
+            var json = new StringBuilder();
+            string? stopReason = null;
+
+            await foreach (var streamEvent in client.Messages.CreateStreaming(createParams, cancellationToken))
+            {
+                if (streamEvent.TryPickContentBlockDelta(out var blockDelta)
+                    && blockDelta.Delta.TryPickText(out var textDelta))
+                {
+                    json.Append(textDelta.Text);
+                }
+                else if (streamEvent.TryPickDelta(out var messageDelta))
+                {
+                    stopReason = messageDelta.Delta.StopReason;
+                }
+            }
+
+            // A refusal returns a normal stream with no usable content — check before reading.
+            if (stopReason == "refusal")
             {
                 return GenerationResult.Fail("The request was declined. Try rephrasing the form description.");
             }
 
-            var json = response.Content
-                .Select(b => b.Value)
-                .OfType<TextBlock>()
-                .Select(t => t.Text)
-                .FirstOrDefault();
+            // The model hit the token ceiling before closing the JSON, so what we have is
+            // truncated and won't parse. Say so plainly instead of surfacing a deserialization error.
+            if (stopReason == "max_tokens")
+            {
+                return GenerationResult.Fail(
+                    "The form is too large to generate in one pass. Try a shorter document, or split it into sections.");
+            }
 
-            if (string.IsNullOrWhiteSpace(json))
+            if (json.Length == 0)
             {
                 return GenerationResult.Fail("The model returned no content.");
             }
 
-            generated = JsonSerializer.Deserialize<GeneratedForm>(json);
+            generated = JsonSerializer.Deserialize<GeneratedForm>(json.ToString());
         }
         catch (OperationCanceledException)
         {

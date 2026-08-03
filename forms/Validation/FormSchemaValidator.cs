@@ -47,7 +47,21 @@ public static class FormSchemaValidator
         "$formkit", "name", "label", "help", "placeholder", "validation",
         "validationLabel", "options", "value", "rows", "cols",
         "min", "max", "step", "multiple", "disabled", "id",
-        "columnSpan", "optionsLayout",
+        "columnSpan", "optionsLayout", "requiredWhen",
+    };
+
+    /// <summary>
+    /// The exact keys a <c>requiredWhen</c> condition may carry. Like
+    /// <c>columnSpan</c> and <c>optionsLayout</c>, this is the builder's own
+    /// vocabulary rather than a FormKit primitive: it says "this field is required
+    /// only when field X equals value Y", and the client compiles it into a
+    /// reactive validation expression at render time. Storing it as structured
+    /// data — not a <c>$</c>-expression — is what keeps it inside the allowlist
+    /// while still being safe to render (see the class summary).
+    /// </summary>
+    private static readonly HashSet<string> RequiredWhenKeys = new(StringComparer.Ordinal)
+    {
+        "field", "equals",
     };
 
     /// <summary>
@@ -225,6 +239,16 @@ public static class FormSchemaValidator
                 continue;
             }
 
+            if (prop.Name == "requiredWhen")
+            {
+                if (!TryValidateRequiredWhen(prop.Value, path, out error))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
             if (prop.Name == "children")
             {
                 if (prop.Value.ValueKind != JsonValueKind.Array)
@@ -259,6 +283,79 @@ public static class FormSchemaValidator
         {
             error = $"Node {path} (\"{type}\") must have children.";
             return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Validates a <c>requiredWhen</c> condition: an object carrying exactly
+    /// <c>field</c> (the controlling field's name) and <c>equals</c> (the value it
+    /// must hold). It is data, not an expression — the client turns it into a
+    /// reactive validation string at render time, so the injection concern that
+    /// bans <c>$</c>-strings elsewhere does not arise here. We still bound both
+    /// members and reject a leading <c>$</c> so nothing surprising survives the
+    /// round trip through the render layer.
+    /// </summary>
+    private static bool TryValidateRequiredWhen(JsonElement value, string path, out string error)
+    {
+        error = string.Empty;
+
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            error = $"Node {path} property \"requiredWhen\" must be an object.";
+            return false;
+        }
+
+        foreach (var member in value.EnumerateObject())
+        {
+            if (!RequiredWhenKeys.Contains(member.Name))
+            {
+                error = $"Node {path} property \"requiredWhen\" has unsupported key \"{member.Name}\".";
+                return false;
+            }
+        }
+
+        if (!value.TryGetProperty("field", out var field)
+            || field.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(field.GetString()))
+        {
+            error = $"Node {path} property \"requiredWhen\" must have a non-empty string \"field\".";
+            return false;
+        }
+
+        if (field.GetString()!.Length > MaxStringLength || field.GetString()!.StartsWith('$'))
+        {
+            error = $"Node {path} property \"requiredWhen.field\" is too long or starts with \"$\".";
+            return false;
+        }
+
+        // A missing "equals" means "required when the field has any truthy value";
+        // when present it must be a bounded scalar. Objects and arrays are the two
+        // things a compared-against value is never allowed to be.
+        if (value.TryGetProperty("equals", out var equals))
+        {
+            switch (equals.ValueKind)
+            {
+                case JsonValueKind.String:
+                    var text = equals.GetString()!;
+                    if (text.Length > MaxStringLength || text.StartsWith('$'))
+                    {
+                        error = $"Node {path} property \"requiredWhen.equals\" is too long or starts with \"$\".";
+                        return false;
+                    }
+
+                    break;
+
+                case JsonValueKind.Number:
+                case JsonValueKind.True:
+                case JsonValueKind.False:
+                    break;
+
+                default:
+                    error = $"Node {path} property \"requiredWhen.equals\" must be a string, number or boolean.";
+                    return false;
+            }
         }
 
         return true;
