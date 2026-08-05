@@ -68,6 +68,25 @@ const templates = ref([]) // saved report templates
 const currentTemplateId = ref(null) // set once saved, so save becomes an update
 const openTemplateId = ref('') // bound to the "Open existing" picker
 
+// Reusable content blocks (snippets, headers, footers). Phase 1 reuse is copy-in:
+// inserting one splices its nodes into the document, so there is nothing to
+// resolve at render time — a later phase can layer live references on top.
+const blocks = ref([]) // {id, name, kind, formId} from GET /api/blocks
+const insertBlockId = ref('') // bound to the insert-snippet picker
+const snippetName = ref('') // name for a snippet being saved
+const snippetKind = ref('snippet') // header | footer | snippet
+const snippetState = ref({ status: 'idle', message: '' })
+
+const SNIPPET_KINDS = [
+  { value: 'header', label: 'Header' },
+  { value: 'footer', label: 'Footer' },
+  { value: 'snippet', label: 'Snippet' },
+]
+
+function kindLabel(kind) {
+  return SNIPPET_KINDS.find((k) => k.value === kind)?.label ?? kind
+}
+
 const insertIndex = ref('') // bound to the insert-field picker
 const buildPreviewRef = ref(null)
 const reviewPreviewRef = ref(null)
@@ -99,7 +118,7 @@ function emptyDoc() {
 // --- data loading ----------------------------------------------------------
 
 onMounted(async () => {
-  await Promise.all([loadForms(), loadTemplates()])
+  await Promise.all([loadForms(), loadTemplates(), loadBlocks()])
 })
 
 async function loadForms() {
@@ -119,6 +138,16 @@ async function loadTemplates() {
     templates.value = await res.json()
   } catch {
     templates.value = []
+  }
+}
+
+async function loadBlocks() {
+  try {
+    const res = await fetch(apiUrl('/blocks'))
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    blocks.value = await res.json()
+  } catch {
+    blocks.value = []
   }
 }
 
@@ -334,6 +363,77 @@ function insertSelectedField() {
   chain()
     .insertMergeField({ name: field.name, label: field.label, step: field.step })
     .run()
+}
+
+// --- reusable blocks (snippets) --------------------------------------------
+
+// Insert a saved block at the cursor by copying its nodes in — a plain paste of
+// the block's content, not a live link. The block's own merge fields come along
+// and resolve against whatever form this report is on (a [missing] marker if the
+// block was authored against different fields), exactly as hand-inserted fields do.
+async function insertSelectedBlock() {
+  const id = insertBlockId.value
+  insertBlockId.value = ''
+  if (!id || !editor.value) return
+
+  try {
+    const res = await fetch(apiUrl(`/blocks/${id}`))
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const block = await res.json()
+    const nodes = block.content?.content ?? []
+    if (nodes.length) chain().insertContent(nodes).run()
+    snippetState.value = { status: 'idle', message: '' }
+  } catch (err) {
+    snippetState.value = { status: 'error', message: err.message }
+  }
+}
+
+// The document to save as a snippet: the current selection if there is one (so a
+// client-info header can be lifted out of a larger report), otherwise the whole
+// document. Wrapped as a `doc` either way, which is what the server validates and
+// what insert reads back.
+function snippetContent() {
+  const { selection } = editor.value.state
+  if (selection.empty) return editor.value.getJSON()
+  const nodes = selection.content().content.toJSON() ?? []
+  return nodes.length ? { type: 'doc', content: nodes } : editor.value.getJSON()
+}
+
+async function saveAsSnippet() {
+  if (!editor.value) return
+
+  const name = snippetName.value.trim()
+  if (!name) {
+    snippetState.value = { status: 'error', message: 'Name the snippet first.' }
+    return
+  }
+
+  snippetState.value = { status: 'saving', message: '' }
+  try {
+    const res = await fetch(apiUrl('/blocks'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        kind: snippetKind.value,
+        // Form-scoped when the report is on a form, so the block carries the field
+        // vocabulary its merge fields bind to; null (form-agnostic) otherwise.
+        formId: selectedFormId.value || null,
+        content: snippetContent(),
+      }),
+    })
+
+    if (!res.ok) {
+      const problem = await res.json().catch(() => null)
+      throw new Error(problem?.detail ?? `HTTP ${res.status}`)
+    }
+
+    snippetName.value = ''
+    snippetState.value = { status: 'saved', message: 'Saved to the snippet library.' }
+    await loadBlocks()
+  } catch (err) {
+    snippetState.value = { status: 'error', message: err.message }
+  }
 }
 
 // --- persistence -----------------------------------------------------------
@@ -578,6 +678,70 @@ async function downloadPdf() {
         <p class="hint">
           Edits the document below rather than replacing it. Anything the
           instruction doesn't mention is left alone.
+        </p>
+      </section>
+
+      <!-- Reusable blocks: save the current selection/document, or drop a saved one in -->
+      <section class="panel snippets">
+        <h2>Snippets</h2>
+        <div class="snippet-controls">
+          <label class="field snippet-insert">
+            <span>Insert a saved snippet</span>
+            <select
+              v-model="insertBlockId"
+              data-testid="insert-block"
+              :disabled="blocks.length === 0"
+              :title="blocks.length ? 'Insert a saved snippet at the cursor' : 'No snippets saved yet'"
+              @change="insertSelectedBlock"
+            >
+              <option value="" disabled>
+                {{ blocks.length ? 'Insert snippet…' : 'No snippets saved yet' }}
+              </option>
+              <option v-for="b in blocks" :key="b.id" :value="b.id">
+                {{ kindLabel(b.kind) }} · {{ b.name }}
+              </option>
+            </select>
+          </label>
+
+          <div class="snippet-save">
+            <label class="field snippet-name">
+              <span>Save as snippet</span>
+              <input
+                v-model="snippetName"
+                type="text"
+                placeholder="e.g. Client information header"
+                data-testid="snippet-name"
+              />
+            </label>
+            <label class="field snippet-kind">
+              <span>Kind</span>
+              <select v-model="snippetKind" data-testid="snippet-kind">
+                <option v-for="k in SNIPPET_KINDS" :key="k.value" :value="k.value">{{ k.label }}</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              class="primary"
+              data-testid="save-snippet"
+              :disabled="snippetState.status === 'saving'"
+              @click="saveAsSnippet"
+            >
+              {{ snippetState.status === 'saving' ? 'Saving…' : 'Save' }}
+            </button>
+          </div>
+        </div>
+
+        <p
+          v-if="snippetState.message"
+          :class="snippetState.status === 'error' ? 'error' : 'ok'"
+          data-testid="snippet-status"
+        >
+          {{ snippetState.message }}
+        </p>
+        <p class="hint">
+          Select part of the document to save just that (e.g. the client-info
+          header), or save the whole document. Insert drops a copy at the cursor —
+          later edits to a snippet don't change reports already built from it.
         </p>
       </section>
 
@@ -968,6 +1132,42 @@ h2 {
 /* Sits between the form picker and the editor workspace; separate it from both. */
 .refine {
   margin: 0.6rem 0 1rem;
+}
+
+/* The snippet library controls, above the editor workspace. */
+.snippets {
+  margin-bottom: 1rem;
+}
+
+.snippet-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  align-items: flex-end;
+}
+
+.snippet-controls .field {
+  margin-bottom: 0;
+}
+
+.snippet-insert {
+  min-width: 16rem;
+}
+
+/* Name + kind + button on one row, wrapping on narrow widths. */
+.snippet-save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+.snippet-name {
+  min-width: 14rem;
+}
+
+.snippet-kind {
+  min-width: 7rem;
 }
 
 .workspace {

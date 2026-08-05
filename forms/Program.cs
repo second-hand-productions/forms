@@ -22,6 +22,7 @@ var formsConnectionString = builder.Configuration.GetConnectionString("FormsDb")
 builder.Services.AddSingleton<IFormStore>(_ => new SqlServerFormStore(formsConnectionString));
 builder.Services.AddSingleton<IReportTemplateStore>(_ => new SqlServerReportTemplateStore(formsConnectionString));
 builder.Services.AddSingleton<IFormSubmissionStore>(_ => new SqlServerFormSubmissionStore(formsConnectionString));
+builder.Services.AddSingleton<IBlockStore>(_ => new SqlServerBlockStore(formsConnectionString));
 
 // AI generation is optional — the app runs fully without a key, and the
 // /api/forms/generate endpoint reports 503 rather than the app failing to start.
