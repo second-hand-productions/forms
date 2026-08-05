@@ -49,7 +49,7 @@ public class ReportTemplatesController(
             });
         }
 
-        var form = forms.Get(request.FormId.Value);
+        var form = await forms.GetAsync(request.FormId.Value, cancellationToken);
         if (form is null)
         {
             return BadRequest(new ProblemDetails
@@ -107,7 +107,7 @@ public class ReportTemplatesController(
             });
         }
 
-        var form = forms.Get(request.FormId.Value);
+        var form = await forms.GetAsync(request.FormId.Value, cancellationToken);
         if (form is null)
         {
             return BadRequest(new ProblemDetails
@@ -212,41 +212,73 @@ public class ReportTemplatesController(
             : null;
 
     [HttpGet]
-    public ActionResult<IEnumerable<ReportTemplate>> GetAll() => Ok(store.GetAll());
+    public async Task<ActionResult<IEnumerable<ReportTemplate>>> GetAll(CancellationToken cancellationToken) =>
+        Ok(await store.GetAllAsync(cancellationToken));
 
     [HttpGet("{id:guid}")]
-    public ActionResult<ReportTemplate> Get(Guid id)
+    public async Task<ActionResult<ReportTemplate>> Get(Guid id, CancellationToken cancellationToken)
     {
-        var template = store.Get(id);
+        var template = await store.GetAsync(id, cancellationToken);
         return template is null ? NotFound() : Ok(template);
     }
 
     [HttpPost]
-    public ActionResult<ReportTemplate> Create([FromBody] ReportTemplateRequest request)
+    public async Task<ActionResult<ReportTemplate>> Create(
+        [FromBody] ReportTemplateRequest request,
+        CancellationToken cancellationToken)
     {
         if (!TryValidateRequest(request, out var name, out var formId, out var content, out var error))
         {
             return BadRequest(new ProblemDetails { Title = "Invalid report template", Detail = error });
         }
 
-        var created = store.Create(name, formId, content);
+        if (!await FormExistsAsync(formId, cancellationToken))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Invalid report template",
+                Detail = "The selected form does not exist.",
+            });
+        }
+
+        var created = await store.CreateAsync(name, formId, content, cancellationToken);
         return CreatedAtAction(nameof(Get), new { id = created.Id }, created);
     }
 
     [HttpPut("{id:guid}")]
-    public ActionResult<ReportTemplate> Update(Guid id, [FromBody] ReportTemplateRequest request)
+    public async Task<ActionResult<ReportTemplate>> Update(
+        Guid id,
+        [FromBody] ReportTemplateRequest request,
+        CancellationToken cancellationToken)
     {
         if (!TryValidateRequest(request, out var name, out var formId, out var content, out var error))
         {
             return BadRequest(new ProblemDetails { Title = "Invalid report template", Detail = error });
         }
 
-        var updated = store.Update(id, name, formId, content);
+        if (!await FormExistsAsync(formId, cancellationToken))
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Invalid report template",
+                Detail = "The selected form does not exist.",
+            });
+        }
+
+        var updated = await store.UpdateAsync(id, name, formId, content, cancellationToken);
         return updated is null ? NotFound() : Ok(updated);
     }
 
     [HttpDelete("{id:guid}")]
-    public IActionResult Delete(Guid id) => store.Delete(id) ? NoContent() : NotFound();
+    public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken) =>
+        await store.DeleteAsync(id, cancellationToken) ? NoContent() : NotFound();
+
+    // The report binds to a form that exists now. The form may be deleted later —
+    // the renderer tolerates that — but a template referencing a form that never
+    // existed is a client bug, so it's rejected up front. Kept out of the
+    // synchronous shape validator so the DB lookup can be awaited.
+    private async Task<bool> FormExistsAsync(Guid formId, CancellationToken cancellationToken) =>
+        await forms.GetAsync(formId, cancellationToken) is not null;
 
     private bool TryValidateRequest(
         ReportTemplateRequest request,
@@ -280,15 +312,8 @@ public class ReportTemplatesController(
 
         formId = request.FormId.Value;
 
-        // The report binds to a form that exists now. The form may be deleted
-        // later — the renderer tolerates that — but a template referencing a
-        // form that never existed is a client bug, so reject it up front.
-        if (forms.Get(formId) is null)
-        {
-            error = "The selected form does not exist.";
-            return false;
-        }
-
+        // Form existence is checked by the caller (FormExistsAsync), since it's an
+        // awaited DB lookup — this validator stays synchronous and shape-only.
         if (request.Content is null)
         {
             error = "Template content is required.";

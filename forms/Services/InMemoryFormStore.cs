@@ -6,19 +6,24 @@ namespace forms.Services;
 
 /// <summary>
 /// POC persistence. Registered as a singleton, so state survives requests but
-/// not restarts. Swapping this for a real database means implementing
-/// <see cref="IFormStore"/> and changing one registration in Program.cs.
+/// not restarts. Kept as a no-database fallback and for tests; the app registers
+/// <see cref="SqlServerFormStore"/> by default.
+///
+/// The interface is async to match the SQL-backed store; these operations are
+/// synchronous in-memory, so they return already-completed tasks.
 /// </summary>
 public class InMemoryFormStore : IFormStore
 {
     private readonly ConcurrentDictionary<Guid, FormDefinition> _forms = new();
 
-    public IReadOnlyCollection<FormDefinition> GetAll() =>
-        _forms.Values.OrderByDescending(f => f.UpdatedAt).ToList();
+    public Task<IReadOnlyCollection<FormDefinition>> GetAllAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyCollection<FormDefinition>>(
+            _forms.Values.OrderByDescending(f => f.UpdatedAt).ToList());
 
-    public FormDefinition? Get(Guid id) => _forms.TryGetValue(id, out var form) ? form : null;
+    public Task<FormDefinition?> GetAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_forms.TryGetValue(id, out var form) ? form : null);
 
-    public FormDefinition Create(string name, JsonElement schema)
+    public Task<FormDefinition> CreateAsync(string name, JsonElement schema, CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;
         var form = new FormDefinition
@@ -34,21 +39,22 @@ public class InMemoryFormStore : IFormStore
         };
 
         _forms[form.Id] = form;
-        return form;
+        return Task.FromResult(form);
     }
 
-    public FormDefinition? Update(Guid id, string name, JsonElement schema)
+    public Task<FormDefinition?> UpdateAsync(Guid id, string name, JsonElement schema, CancellationToken cancellationToken = default)
     {
         if (!_forms.TryGetValue(id, out var existing))
         {
-            return null;
+            return Task.FromResult<FormDefinition?>(null);
         }
 
         existing.Name = name;
         existing.Schema = schema.Clone();
         existing.UpdatedAt = DateTimeOffset.UtcNow;
-        return existing;
+        return Task.FromResult<FormDefinition?>(existing);
     }
 
-    public bool Delete(Guid id) => _forms.TryRemove(id, out _);
+    public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_forms.TryRemove(id, out _));
 }

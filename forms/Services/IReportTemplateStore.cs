@@ -5,13 +5,13 @@ namespace forms.Services;
 
 public interface IReportTemplateStore
 {
-    IReadOnlyCollection<ReportTemplate> GetAll();
+    Task<IReadOnlyCollection<ReportTemplate>> GetAllAsync(CancellationToken cancellationToken = default);
 
-    ReportTemplate? Get(Guid id);
+    Task<ReportTemplate?> GetAsync(Guid id, CancellationToken cancellationToken = default);
 
-    ReportTemplate Create(string name, Guid formId, JsonElement content);
+    Task<ReportTemplate> CreateAsync(string name, Guid formId, JsonElement content, CancellationToken cancellationToken = default);
 
-    ReportTemplate? Update(Guid id, string name, Guid formId, JsonElement content);
+    Task<ReportTemplate?> UpdateAsync(Guid id, string name, Guid formId, JsonElement content, CancellationToken cancellationToken = default);
 
-    bool Delete(Guid id);
+    Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default);
 }

@@ -6,21 +6,25 @@ namespace forms.Services;
 
 /// <summary>
 /// POC persistence, mirroring <see cref="InMemoryFormStore"/>. Registered as a
-/// singleton, so state survives requests but not restarts. Swapping this for a
-/// real database means implementing <see cref="IReportTemplateStore"/> and
-/// changing one registration in Program.cs.
+/// singleton, so state survives requests but not restarts. Kept as a no-database
+/// fallback and for tests; the app registers <see cref="SqlServerReportTemplateStore"/>
+/// by default.
+///
+/// The interface is async to match the SQL-backed store; these operations are
+/// synchronous in-memory, so they return already-completed tasks.
 /// </summary>
 public class InMemoryReportTemplateStore : IReportTemplateStore
 {
     private readonly ConcurrentDictionary<Guid, ReportTemplate> _templates = new();
 
-    public IReadOnlyCollection<ReportTemplate> GetAll() =>
-        _templates.Values.OrderByDescending(t => t.UpdatedAt).ToList();
+    public Task<IReadOnlyCollection<ReportTemplate>> GetAllAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyCollection<ReportTemplate>>(
+            _templates.Values.OrderByDescending(t => t.UpdatedAt).ToList());
 
-    public ReportTemplate? Get(Guid id) =>
-        _templates.TryGetValue(id, out var template) ? template : null;
+    public Task<ReportTemplate?> GetAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_templates.TryGetValue(id, out var template) ? template : null);
 
-    public ReportTemplate Create(string name, Guid formId, JsonElement content)
+    public Task<ReportTemplate> CreateAsync(string name, Guid formId, JsonElement content, CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;
         var template = new ReportTemplate
@@ -37,22 +41,23 @@ public class InMemoryReportTemplateStore : IReportTemplateStore
         };
 
         _templates[template.Id] = template;
-        return template;
+        return Task.FromResult(template);
     }
 
-    public ReportTemplate? Update(Guid id, string name, Guid formId, JsonElement content)
+    public Task<ReportTemplate?> UpdateAsync(Guid id, string name, Guid formId, JsonElement content, CancellationToken cancellationToken = default)
     {
         if (!_templates.TryGetValue(id, out var existing))
         {
-            return null;
+            return Task.FromResult<ReportTemplate?>(null);
         }
 
         existing.Name = name;
         existing.FormId = formId;
         existing.Content = content.Clone();
         existing.UpdatedAt = DateTimeOffset.UtcNow;
-        return existing;
+        return Task.FromResult<ReportTemplate?>(existing);
     }
 
-    public bool Delete(Guid id) => _templates.TryRemove(id, out _);
+    public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_templates.TryRemove(id, out _));
 }

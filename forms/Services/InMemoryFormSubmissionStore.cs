@@ -8,21 +8,25 @@ namespace forms.Services;
 /// POC persistence, mirroring <see cref="InMemoryFormStore"/>. Kept as a
 /// no-database fallback and for tests; the app registers
 /// <see cref="SqlServerFormSubmissionStore"/> by default.
+///
+/// The interface is async to match the SQL-backed store; these operations are
+/// synchronous in-memory, so they return already-completed tasks.
 /// </summary>
 public class InMemoryFormSubmissionStore : IFormSubmissionStore
 {
     private readonly ConcurrentDictionary<Guid, FormSubmission> _submissions = new();
 
-    public IReadOnlyCollection<FormSubmission> GetByForm(Guid formId) =>
-        _submissions.Values
-            .Where(s => s.FormId == formId)
-            .OrderByDescending(s => s.CreatedAt)
-            .ToList();
+    public Task<IReadOnlyCollection<FormSubmission>> GetByFormAsync(Guid formId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyCollection<FormSubmission>>(
+            _submissions.Values
+                .Where(s => s.FormId == formId)
+                .OrderByDescending(s => s.CreatedAt)
+                .ToList());
 
-    public FormSubmission? Get(Guid id) =>
-        _submissions.TryGetValue(id, out var submission) ? submission : null;
+    public Task<FormSubmission?> GetAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_submissions.TryGetValue(id, out var submission) ? submission : null);
 
-    public FormSubmission Create(Guid formId, JsonElement data)
+    public Task<FormSubmission> CreateAsync(Guid formId, JsonElement data, CancellationToken cancellationToken = default)
     {
         var submission = new FormSubmission
         {
@@ -35,8 +39,9 @@ public class InMemoryFormSubmissionStore : IFormSubmissionStore
         };
 
         _submissions[submission.Id] = submission;
-        return submission;
+        return Task.FromResult(submission);
     }
 
-    public bool Delete(Guid id) => _submissions.TryRemove(id, out _);
+    public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_submissions.TryRemove(id, out _));
 }

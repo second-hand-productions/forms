@@ -1,16 +1,17 @@
+using System.Text.Json;
 using forms.Models;
 
 namespace forms.Services;
 
 public interface IFormStore
 {
-    IReadOnlyCollection<FormDefinition> GetAll();
+    Task<IReadOnlyCollection<FormDefinition>> GetAllAsync(CancellationToken cancellationToken = default);
 
-    FormDefinition? Get(Guid id);
+    Task<FormDefinition?> GetAsync(Guid id, CancellationToken cancellationToken = default);
 
-    FormDefinition Create(string name, System.Text.Json.JsonElement schema);
+    Task<FormDefinition> CreateAsync(string name, JsonElement schema, CancellationToken cancellationToken = default);
 
-    FormDefinition? Update(Guid id, string name, System.Text.Json.JsonElement schema);
+    Task<FormDefinition?> UpdateAsync(Guid id, string name, JsonElement schema, CancellationToken cancellationToken = default);
 
-    bool Delete(Guid id);
+    Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default);
 }

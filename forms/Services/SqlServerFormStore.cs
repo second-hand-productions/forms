@@ -10,8 +10,8 @@ namespace forms.Services;
 /// shape without migrations" design of <see cref="FormDefinition"/>.
 ///
 /// Safe to register as a singleton: it holds only a connection string and opens a
-/// pooled <see cref="SqlConnection"/> per call. The interface is synchronous, so
-/// the ADO.NET calls are too.
+/// pooled <see cref="SqlConnection"/> per call. All I/O is async, and connections
+/// open with the shared <see cref="SqlRetry"/> transient-fault policy.
 /// </summary>
 public class SqlServerFormStore : IFormStore
 {
@@ -19,7 +19,7 @@ public class SqlServerFormStore : IFormStore
 
     public SqlServerFormStore(string connectionString) => _connectionString = connectionString;
 
-    public IReadOnlyCollection<FormDefinition> GetAll()
+    public async Task<IReadOnlyCollection<FormDefinition>> GetAllAsync(CancellationToken cancellationToken = default)
     {
         const string sql = """
             SELECT Id, Name, [Schema], CreatedAt, UpdatedAt
@@ -27,13 +27,13 @@ public class SqlServerFormStore : IFormStore
             ORDER BY UpdatedAt DESC;
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
-        conn.Open();
-        using var reader = cmd.ExecuteReader();
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        // A SELECT is safe to retry at the command level, not just on open.
+        using var cmd = new SqlCommand(sql, conn) { RetryLogicProvider = SqlRetry.Provider };
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
 
         var forms = new List<FormDefinition>();
-        while (reader.Read())
+        while (await reader.ReadAsync(cancellationToken))
         {
             forms.Add(Map(reader));
         }
@@ -41,7 +41,7 @@ public class SqlServerFormStore : IFormStore
         return forms;
     }
 
-    public FormDefinition? Get(Guid id)
+    public async Task<FormDefinition?> GetAsync(Guid id, CancellationToken cancellationToken = default)
     {
         const string sql = """
             SELECT Id, Name, [Schema], CreatedAt, UpdatedAt
@@ -49,15 +49,14 @@ public class SqlServerFormStore : IFormStore
             WHERE Id = @id;
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn) { RetryLogicProvider = SqlRetry.Provider };
         cmd.Parameters.AddWithValue("@id", id);
-        conn.Open();
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? Map(reader) : null;
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? Map(reader) : null;
     }
 
-    public FormDefinition Create(string name, JsonElement schema)
+    public async Task<FormDefinition> CreateAsync(string name, JsonElement schema, CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;
         var form = new FormDefinition
@@ -76,20 +75,21 @@ public class SqlServerFormStore : IFormStore
             VALUES (@id, @name, @schema, @createdAt, @updatedAt);
             """;
 
-        using var conn = new SqlConnection(_connectionString);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        // No command-level retry on writes: retry lives on the connection open only,
+        // so a transient fault can never replay this INSERT.
         using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@id", form.Id);
         cmd.Parameters.AddWithValue("@name", form.Name);
         cmd.Parameters.AddWithValue("@schema", schema.GetRawText());
         cmd.Parameters.AddWithValue("@createdAt", form.CreatedAt);
         cmd.Parameters.AddWithValue("@updatedAt", form.UpdatedAt);
-        conn.Open();
-        cmd.ExecuteNonQuery();
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
 
         return form;
     }
 
-    public FormDefinition? Update(Guid id, string name, JsonElement schema)
+    public async Task<FormDefinition?> UpdateAsync(Guid id, string name, JsonElement schema, CancellationToken cancellationToken = default)
     {
         // OUTPUT returns the persisted row (including the untouched CreatedAt) only
         // when a row matched, so a null reader means "not found" — same contract as
@@ -101,26 +101,24 @@ public class SqlServerFormStore : IFormStore
             WHERE Id = @id;
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn); // write: open-level retry only
         cmd.Parameters.AddWithValue("@id", id);
         cmd.Parameters.AddWithValue("@name", name);
         cmd.Parameters.AddWithValue("@schema", schema.GetRawText());
         cmd.Parameters.AddWithValue("@updatedAt", DateTimeOffset.UtcNow);
-        conn.Open();
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? Map(reader) : null;
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? Map(reader) : null;
     }
 
-    public bool Delete(Guid id)
+    public async Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default)
     {
         const string sql = "DELETE FROM dbo.FormDefinitions WHERE Id = @id;";
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn); // write: open-level retry only
         cmd.Parameters.AddWithValue("@id", id);
-        conn.Open();
-        return cmd.ExecuteNonQuery() > 0;
+        return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
     private static FormDefinition Map(SqlDataReader reader)

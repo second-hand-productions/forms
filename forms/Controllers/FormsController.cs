@@ -105,41 +105,48 @@ public class FormsController(IFormStore store, IFormSchemaGenerator? generator =
         });
 
     [HttpGet]
-    public ActionResult<IEnumerable<FormDefinition>> GetAll() => Ok(store.GetAll());
+    public async Task<ActionResult<IEnumerable<FormDefinition>>> GetAll(CancellationToken cancellationToken) =>
+        Ok(await store.GetAllAsync(cancellationToken));
 
     [HttpGet("{id:guid}")]
-    public ActionResult<FormDefinition> Get(Guid id)
+    public async Task<ActionResult<FormDefinition>> Get(Guid id, CancellationToken cancellationToken)
     {
-        var form = store.Get(id);
+        var form = await store.GetAsync(id, cancellationToken);
         return form is null ? NotFound() : Ok(form);
     }
 
     [HttpPost]
-    public ActionResult<FormDefinition> Create([FromBody] FormDefinitionRequest request)
+    public async Task<ActionResult<FormDefinition>> Create(
+        [FromBody] FormDefinitionRequest request,
+        CancellationToken cancellationToken)
     {
         if (!TryValidateRequest(request, out var name, out var schema, out var error))
         {
             return BadRequest(new ProblemDetails { Title = "Invalid form", Detail = error });
         }
 
-        var created = store.Create(name, schema);
+        var created = await store.CreateAsync(name, schema, cancellationToken);
         return CreatedAtAction(nameof(Get), new { id = created.Id }, created);
     }
 
     [HttpPut("{id:guid}")]
-    public ActionResult<FormDefinition> Update(Guid id, [FromBody] FormDefinitionRequest request)
+    public async Task<ActionResult<FormDefinition>> Update(
+        Guid id,
+        [FromBody] FormDefinitionRequest request,
+        CancellationToken cancellationToken)
     {
         if (!TryValidateRequest(request, out var name, out var schema, out var error))
         {
             return BadRequest(new ProblemDetails { Title = "Invalid form", Detail = error });
         }
 
-        var updated = store.Update(id, name, schema);
+        var updated = await store.UpdateAsync(id, name, schema, cancellationToken);
         return updated is null ? NotFound() : Ok(updated);
     }
 
     [HttpDelete("{id:guid}")]
-    public IActionResult Delete(Guid id) => store.Delete(id) ? NoContent() : NotFound();
+    public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken) =>
+        await store.DeleteAsync(id, cancellationToken) ? NoContent() : NotFound();
 
     private static bool TryValidateRequest(
         FormDefinitionRequest request,

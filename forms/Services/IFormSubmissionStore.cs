@@ -6,11 +6,11 @@ namespace forms.Services;
 public interface IFormSubmissionStore
 {
     /// <summary>All submissions for one form, newest first.</summary>
-    IReadOnlyCollection<FormSubmission> GetByForm(Guid formId);
+    Task<IReadOnlyCollection<FormSubmission>> GetByFormAsync(Guid formId, CancellationToken cancellationToken = default);
 
-    FormSubmission? Get(Guid id);
+    Task<FormSubmission?> GetAsync(Guid id, CancellationToken cancellationToken = default);
 
-    FormSubmission Create(Guid formId, JsonElement data);
+    Task<FormSubmission> CreateAsync(Guid formId, JsonElement data, CancellationToken cancellationToken = default);
 
-    bool Delete(Guid id);
+    Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default);
 }

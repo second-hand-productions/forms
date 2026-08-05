@@ -12,7 +12,8 @@ namespace forms.Services;
 /// deleted after the fact.
 ///
 /// Safe to register as a singleton: it holds only a connection string and opens a
-/// pooled <see cref="SqlConnection"/> per call.
+/// pooled <see cref="SqlConnection"/> per call, async, with the shared
+/// <see cref="SqlRetry"/> transient-fault policy.
 /// </summary>
 public class SqlServerFormSubmissionStore : IFormSubmissionStore
 {
@@ -20,7 +21,7 @@ public class SqlServerFormSubmissionStore : IFormSubmissionStore
 
     public SqlServerFormSubmissionStore(string connectionString) => _connectionString = connectionString;
 
-    public IReadOnlyCollection<FormSubmission> GetByForm(Guid formId)
+    public async Task<IReadOnlyCollection<FormSubmission>> GetByFormAsync(Guid formId, CancellationToken cancellationToken = default)
     {
         const string sql = """
             SELECT Id, FormId, [Data], CreatedAt
@@ -29,14 +30,13 @@ public class SqlServerFormSubmissionStore : IFormSubmissionStore
             ORDER BY CreatedAt DESC;
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn) { RetryLogicProvider = SqlRetry.Provider };
         cmd.Parameters.AddWithValue("@formId", formId);
-        conn.Open();
-        using var reader = cmd.ExecuteReader();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
 
         var submissions = new List<FormSubmission>();
-        while (reader.Read())
+        while (await reader.ReadAsync(cancellationToken))
         {
             submissions.Add(Map(reader));
         }
@@ -44,7 +44,7 @@ public class SqlServerFormSubmissionStore : IFormSubmissionStore
         return submissions;
     }
 
-    public FormSubmission? Get(Guid id)
+    public async Task<FormSubmission?> GetAsync(Guid id, CancellationToken cancellationToken = default)
     {
         const string sql = """
             SELECT Id, FormId, [Data], CreatedAt
@@ -52,15 +52,14 @@ public class SqlServerFormSubmissionStore : IFormSubmissionStore
             WHERE Id = @id;
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn) { RetryLogicProvider = SqlRetry.Provider };
         cmd.Parameters.AddWithValue("@id", id);
-        conn.Open();
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? Map(reader) : null;
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? Map(reader) : null;
     }
 
-    public FormSubmission Create(Guid formId, JsonElement data)
+    public async Task<FormSubmission> CreateAsync(Guid formId, JsonElement data, CancellationToken cancellationToken = default)
     {
         var submission = new FormSubmission
         {
@@ -75,27 +74,25 @@ public class SqlServerFormSubmissionStore : IFormSubmissionStore
             VALUES (@id, @formId, @data, @createdAt);
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn); // write: open-level retry only
         cmd.Parameters.AddWithValue("@id", submission.Id);
         cmd.Parameters.AddWithValue("@formId", submission.FormId);
         cmd.Parameters.AddWithValue("@data", data.GetRawText());
         cmd.Parameters.AddWithValue("@createdAt", submission.CreatedAt);
-        conn.Open();
-        cmd.ExecuteNonQuery();
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
 
         return submission;
     }
 
-    public bool Delete(Guid id)
+    public async Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default)
     {
         const string sql = "DELETE FROM dbo.FormSubmissions WHERE Id = @id;";
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn); // write: open-level retry only
         cmd.Parameters.AddWithValue("@id", id);
-        conn.Open();
-        return cmd.ExecuteNonQuery() > 0;
+        return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
     private static FormSubmission Map(SqlDataReader reader)

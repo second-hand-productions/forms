@@ -12,7 +12,8 @@ namespace forms.Services;
 /// that a template tolerates a dangling reference to a deleted form.
 ///
 /// Safe to register as a singleton: it holds only a connection string and opens a
-/// pooled <see cref="SqlConnection"/> per call.
+/// pooled <see cref="SqlConnection"/> per call, async, with the shared
+/// <see cref="SqlRetry"/> transient-fault policy.
 /// </summary>
 public class SqlServerReportTemplateStore : IReportTemplateStore
 {
@@ -20,7 +21,7 @@ public class SqlServerReportTemplateStore : IReportTemplateStore
 
     public SqlServerReportTemplateStore(string connectionString) => _connectionString = connectionString;
 
-    public IReadOnlyCollection<ReportTemplate> GetAll()
+    public async Task<IReadOnlyCollection<ReportTemplate>> GetAllAsync(CancellationToken cancellationToken = default)
     {
         const string sql = """
             SELECT Id, Name, FormId, [Content], CreatedAt, UpdatedAt
@@ -28,13 +29,12 @@ public class SqlServerReportTemplateStore : IReportTemplateStore
             ORDER BY UpdatedAt DESC;
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
-        conn.Open();
-        using var reader = cmd.ExecuteReader();
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn) { RetryLogicProvider = SqlRetry.Provider };
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
 
         var templates = new List<ReportTemplate>();
-        while (reader.Read())
+        while (await reader.ReadAsync(cancellationToken))
         {
             templates.Add(Map(reader));
         }
@@ -42,7 +42,7 @@ public class SqlServerReportTemplateStore : IReportTemplateStore
         return templates;
     }
 
-    public ReportTemplate? Get(Guid id)
+    public async Task<ReportTemplate?> GetAsync(Guid id, CancellationToken cancellationToken = default)
     {
         const string sql = """
             SELECT Id, Name, FormId, [Content], CreatedAt, UpdatedAt
@@ -50,15 +50,14 @@ public class SqlServerReportTemplateStore : IReportTemplateStore
             WHERE Id = @id;
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn) { RetryLogicProvider = SqlRetry.Provider };
         cmd.Parameters.AddWithValue("@id", id);
-        conn.Open();
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? Map(reader) : null;
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? Map(reader) : null;
     }
 
-    public ReportTemplate Create(string name, Guid formId, JsonElement content)
+    public async Task<ReportTemplate> CreateAsync(string name, Guid formId, JsonElement content, CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;
         var template = new ReportTemplate
@@ -78,21 +77,20 @@ public class SqlServerReportTemplateStore : IReportTemplateStore
             VALUES (@id, @name, @formId, @content, @createdAt, @updatedAt);
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn); // write: open-level retry only
         cmd.Parameters.AddWithValue("@id", template.Id);
         cmd.Parameters.AddWithValue("@name", template.Name);
         cmd.Parameters.AddWithValue("@formId", template.FormId);
         cmd.Parameters.AddWithValue("@content", content.GetRawText());
         cmd.Parameters.AddWithValue("@createdAt", template.CreatedAt);
         cmd.Parameters.AddWithValue("@updatedAt", template.UpdatedAt);
-        conn.Open();
-        cmd.ExecuteNonQuery();
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
 
         return template;
     }
 
-    public ReportTemplate? Update(Guid id, string name, Guid formId, JsonElement content)
+    public async Task<ReportTemplate?> UpdateAsync(Guid id, string name, Guid formId, JsonElement content, CancellationToken cancellationToken = default)
     {
         // OUTPUT returns the persisted row (including the untouched CreatedAt) only
         // when a row matched, so a null reader means "not found".
@@ -103,27 +101,25 @@ public class SqlServerReportTemplateStore : IReportTemplateStore
             WHERE Id = @id;
             """;
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn); // write: open-level retry only
         cmd.Parameters.AddWithValue("@id", id);
         cmd.Parameters.AddWithValue("@name", name);
         cmd.Parameters.AddWithValue("@formId", formId);
         cmd.Parameters.AddWithValue("@content", content.GetRawText());
         cmd.Parameters.AddWithValue("@updatedAt", DateTimeOffset.UtcNow);
-        conn.Open();
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? Map(reader) : null;
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? Map(reader) : null;
     }
 
-    public bool Delete(Guid id)
+    public async Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken = default)
     {
         const string sql = "DELETE FROM dbo.ReportTemplates WHERE Id = @id;";
 
-        using var conn = new SqlConnection(_connectionString);
-        using var cmd = new SqlCommand(sql, conn);
+        await using var conn = await SqlRetry.OpenConnectionAsync(_connectionString, cancellationToken);
+        using var cmd = new SqlCommand(sql, conn); // write: open-level retry only
         cmd.Parameters.AddWithValue("@id", id);
-        conn.Open();
-        return cmd.ExecuteNonQuery() > 0;
+        return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
     private static ReportTemplate Map(SqlDataReader reader)

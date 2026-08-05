@@ -16,30 +16,33 @@ namespace forms.Controllers;
 public class FormSubmissionsController(IFormSubmissionStore store, IFormStore forms) : ControllerBase
 {
     [HttpGet]
-    public ActionResult<IEnumerable<FormSubmission>> GetAll(Guid formId)
+    public async Task<ActionResult<IEnumerable<FormSubmission>>> GetAll(Guid formId, CancellationToken cancellationToken)
     {
         // A submission list is only meaningful for a form that exists; a missing
         // form is a 404 rather than a silently empty list, which would read as
         // "no responses yet" for a form that was actually deleted.
-        if (forms.Get(formId) is null)
+        if (await forms.GetAsync(formId, cancellationToken) is null)
         {
             return NotFound();
         }
 
-        return Ok(store.GetByForm(formId));
+        return Ok(await store.GetByFormAsync(formId, cancellationToken));
     }
 
     [HttpGet("{id:guid}")]
-    public ActionResult<FormSubmission> Get(Guid formId, Guid id)
+    public async Task<ActionResult<FormSubmission>> Get(Guid formId, Guid id, CancellationToken cancellationToken)
     {
-        var submission = store.Get(id);
+        var submission = await store.GetAsync(id, cancellationToken);
         return submission is null || submission.FormId != formId ? NotFound() : Ok(submission);
     }
 
     [HttpPost]
-    public ActionResult<FormSubmission> Create(Guid formId, [FromBody] FormSubmissionRequest request)
+    public async Task<ActionResult<FormSubmission>> Create(
+        Guid formId,
+        [FromBody] FormSubmissionRequest request,
+        CancellationToken cancellationToken)
     {
-        if (forms.Get(formId) is null)
+        if (await forms.GetAsync(formId, cancellationToken) is null)
         {
             return BadRequest(new ProblemDetails
             {
@@ -61,19 +64,19 @@ public class FormSubmissionsController(IFormSubmissionStore store, IFormStore fo
             });
         }
 
-        var created = store.Create(formId, data);
+        var created = await store.CreateAsync(formId, data, cancellationToken);
         return CreatedAtAction(nameof(Get), new { formId, id = created.Id }, created);
     }
 
     [HttpDelete("{id:guid}")]
-    public IActionResult Delete(Guid formId, Guid id)
+    public async Task<IActionResult> Delete(Guid formId, Guid id, CancellationToken cancellationToken)
     {
-        var submission = store.Get(id);
+        var submission = await store.GetAsync(id, cancellationToken);
         if (submission is null || submission.FormId != formId)
         {
             return NotFound();
         }
 
-        return store.Delete(id) ? NoContent() : NotFound();
+        return await store.DeleteAsync(id, cancellationToken) ? NoContent() : NotFound();
     }
 }
