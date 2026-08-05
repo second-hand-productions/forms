@@ -7,12 +7,20 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
 
-// POC persistence: singleton so saved forms survive across requests.
-// Replace with a database-backed IFormStore when the POC graduates.
-builder.Services.AddSingleton<IFormStore, InMemoryFormStore>();
+// SQL Server-backed persistence. The connection string lives in configuration
+// (ConnectionStrings:FormsDb) — never in source. Supply it out-of-band:
+//   dotnet user-secrets set "ConnectionStrings:FormsDb" "<conn>"   (local dev)
+//   ConnectionStrings__FormsDb=<conn>                              (container/CI)
+// The stores are safe as singletons: each holds only the connection string and
+// opens a pooled connection per call. (InMemoryFormStore/InMemoryReportTemplateStore
+// remain as a no-database fallback and for tests.)
+var formsConnectionString = builder.Configuration.GetConnectionString("FormsDb")
+    ?? throw new InvalidOperationException(
+        "Connection string 'FormsDb' is not configured. Set ConnectionStrings:FormsDb "
+        + "via user-secrets (dev) or the ConnectionStrings__FormsDb environment variable.");
 
-// Report templates: same in-memory POC persistence as forms above.
-builder.Services.AddSingleton<IReportTemplateStore, InMemoryReportTemplateStore>();
+builder.Services.AddSingleton<IFormStore>(_ => new SqlServerFormStore(formsConnectionString));
+builder.Services.AddSingleton<IReportTemplateStore>(_ => new SqlServerReportTemplateStore(formsConnectionString));
 
 // AI generation is optional — the app runs fully without a key, and the
 // /api/forms/generate endpoint reports 503 rather than the app failing to start.
