@@ -25,7 +25,41 @@ import {
 } from '../builder/schemaModel.js'
 import { apiUrl } from '../api.js'
 
-// useDragAndDrop owns the array: `nodes` is reordered in place on drop.
+// Source of truth: the whole form as one flat list of fields and step-break
+// markers. Everything derived — schema, preview, save, duplicate detection —
+// reads this. The drag list below is deliberately *not* this array; it holds
+// only the active step's fields, so a 12-step form is edited one step at a time
+// rather than as a single canvas the length of the whole form.
+const allNodes = ref([createNode('text'), createNode('email')])
+
+// Which step the canvas is showing, as an index into the groups groupIntoSteps
+// returns — so it counts the implicit leading step (fields before the first
+// marker) exactly as the tabs and the preview do.
+const activeStepIndex = ref(0)
+
+const stepGroups = computed(() => groupIntoSteps(allNodes.value))
+const hasMultipleSteps = computed(() => stepGroups.value.length > 1)
+
+function activeGroupFields() {
+  return stepGroups.value[activeStepIndex.value]?.fields ?? []
+}
+
+/** Rebuild the flat list from grouped steps — the inverse of groupIntoSteps. */
+function flattenGroups(groups) {
+  const flat = []
+  for (const group of groups) {
+    if (group.step) flat.push(group.step)
+    flat.push(...group.fields)
+  }
+  return flat
+}
+
+// The canvas renders — and the drag library owns — only the active step's
+// fields. A within-step drag mutates stepFields in place; its onSort writes that
+// new order back into allNodes. Every *other* mutation runs the opposite way,
+// through commitNodes, which rewrites allNodes and reloads stepFields from it.
+// The two directions never fire from the same event, so there is no feedback
+// loop to guard and no watcher to keep them in step.
 //
 // The canvas lays fields out on a wrapping grid, so drops are resolved in two
 // dimensions: the library compares the dragged and hovered rects, takes
@@ -33,10 +67,79 @@ import { apiUrl } from '../api.js'
 // threshold is raised because side-by-side cards differ in width — against a
 // narrow neighbour the default trips as soon as the pointer enters the card,
 // which reads as the layout twitching before the user has committed to a side.
-const [listRef, nodes] = useDragAndDrop(
-  [createNode('text'), createNode('email')],
-  { threshold: { horizontal: 0.35, vertical: 0.15 } }
-)
+const [listRef, stepFields] = useDragAndDrop(activeGroupFields(), {
+  threshold: { horizontal: 0.35, vertical: 0.15 },
+  onSort: ({ values }) => {
+    const groups = groupIntoSteps(allNodes.value)
+    const group = groups[activeStepIndex.value]
+    if (!group) return
+    // `values` are the same node objects, reordered — splice them back into the
+    // flat list without disturbing the other steps.
+    group.fields = values
+    allNodes.value = flattenGroups(groups)
+  },
+  // A card can be dropped onto another step's tab to move it there. The tabs sit
+  // outside this drag list, so the library never treats them as sort targets;
+  // the native drag events they listen for do the moving. We only need to know
+  // which field is in hand — the tab's own drop handler supplies the target.
+  onDragstart: ({ draggedNode }) => {
+    draggedFieldUid.value = draggedNode?.data?.value?._uid ?? null
+  },
+  onDragend: () => {
+    draggedFieldUid.value = null
+    dropTargetStep.value = null
+  },
+})
+
+// The field currently being dragged, and the tab it is hovering, for the
+// cross-step move affordance. Null except mid-drag.
+const draggedFieldUid = ref(null)
+const dropTargetStep = ref(null)
+
+function onStepDragEnter(index) {
+  if (draggedFieldUid.value !== null) dropTargetStep.value = index
+}
+
+function onStepDragLeave(index) {
+  if (dropTargetStep.value === index) dropTargetStep.value = null
+}
+
+function onStepDrop(index) {
+  const uid = draggedFieldUid.value
+  dropTargetStep.value = null
+  // Dropping onto the current step is a no-op — nothing to move.
+  if (uid === null || index === activeStepIndex.value) return
+  moveFieldToStep(uid, index)
+}
+
+/** Point the canvas at the active step's fields, after allNodes changed. */
+function loadActiveStepFields() {
+  stepFields.value = [...activeGroupFields()]
+}
+
+/**
+ * Replace the whole form and refresh the canvas. Every non-drag mutation lands
+ * here: it clamps the active step to the new step count — a removed step must
+ * not leave the canvas pointing past the end — and reloads the canvas from the
+ * new list. Pass a stepIndex to jump the canvas to a specific step, e.g. the one
+ * just added or the one a field was moved into.
+ */
+function commitNodes(next, stepIndex) {
+  allNodes.value = next
+  const maxIndex = Math.max(0, groupIntoSteps(next).length - 1)
+  activeStepIndex.value = Math.min(stepIndex ?? activeStepIndex.value, maxIndex)
+  loadActiveStepFields()
+}
+
+function setActiveStep(index) {
+  activeStepIndex.value = index
+  loadActiveStepFields()
+}
+
+/** The label a step group shows on its tab and in the "move to step" menu. */
+function stepLabel(group, index) {
+  return group.step?.label || `Step ${index + 1}`
+}
 
 /**
  * The builder is a three-page flow: describe, build, review.
@@ -66,7 +169,7 @@ function goTo(id) {
   page.value = Math.min(Math.max(id, 1), PAGES.length)
 }
 
-const selectedUid = ref(nodes.value[0]?._uid ?? null)
+const selectedUid = ref(allNodes.value[0]?._uid ?? null)
 const formName = ref('Untitled form')
 const saveState = ref({ status: 'idle', message: '' })
 const submitted = ref(null)
@@ -99,8 +202,8 @@ async function openForm() {
     const form = await res.json()
     // Loaded forms land in the same editable canvas as generated or hand-built
     // ones; saving later updates this form rather than cloning it.
-    nodes.value = fromSchema(form.schema)
-    selectedUid.value = nodes.value.find((n) => !isStep(n))?._uid ?? null
+    commitNodes(fromSchema(form.schema), 0)
+    selectedUid.value = allNodes.value.find((n) => !isStep(n))?._uid ?? null
     formName.value = form.name
     currentFormId.value = form.id
     saveState.value = { status: 'idle', message: '' }
@@ -113,7 +216,7 @@ async function openForm() {
 }
 
 const selected = computed(() =>
-  nodes.value.find((n) => n._uid === selectedUid.value) ?? null
+  allNodes.value.find((n) => n._uid === selectedUid.value) ?? null
 )
 
 const selectedTypeDef = computed(() =>
@@ -188,11 +291,11 @@ function onCardClick(uid, event) {
   openProperties(uid)
 }
 
-const isMultiStep = computed(() => nodes.value.some(isStep))
+const isMultiStep = computed(() => allNodes.value.some(isStep))
 
-const duplicateNames = computed(() => findDuplicateNames(nodes.value))
+const duplicateNames = computed(() => findDuplicateNames(allNodes.value))
 
-const schema = computed(() => toSchema(nodes.value))
+const schema = computed(() => toSchema(allNodes.value))
 
 // What the preview renders, and what a consumer of the saved form would render:
 // the same schema with columnSpan resolved to a grid class. Saving sends
@@ -254,11 +357,11 @@ function renderKey(node) {
 // screen until the preview happened to rebuild for another reason.
 const conditionKey = computed(() => {
   const controllers = new Set()
-  for (const node of nodes.value) {
+  for (const node of allNodes.value) {
     if (node.requiredWhen?.field) controllers.add(node.requiredWhen.field)
   }
 
-  return nodes.value
+  return allNodes.value
     .map((node) => {
       const dep = node.requiredWhen
         ? `${node.requiredWhen.field}=${node.requiredWhen.equals ?? ''}`
@@ -268,50 +371,103 @@ const conditionKey = computed(() => {
     .join(',')
 })
 
-const previewKey = computed(() => `${nodes.value.map(renderKey).join('|')}#${conditionKey.value}`)
+const previewKey = computed(() => `${allNodes.value.map(renderKey).join('|')}#${conditionKey.value}`)
 
+// A new field joins the end of the step the canvas is showing, not the end of
+// the whole form — the field appears where the user is looking.
 function addField(type) {
   const node = createNode(type)
-  nodes.value = [...nodes.value, node]
+  const groups = groupIntoSteps(allNodes.value)
+
+  if (!groups.length) {
+    commitNodes([node], 0)
+  } else {
+    const index = Math.min(activeStepIndex.value, groups.length - 1)
+    groups[index].fields.push(node)
+    commitNodes(flattenGroups(groups), index)
+  }
+
   selectedUid.value = node._uid
 }
 
 function addStep() {
   // Existing steps + the implicit leading step (if any fields precede the
   // first marker) + 1 for the step being added.
-  const explicitSteps = nodes.value.filter(isStep).length
+  const explicitSteps = allNodes.value.filter(isStep).length
   const hasImplicitLeadingStep =
-    nodes.value.length > 0 && !isStep(nodes.value[0])
+    allNodes.value.length > 0 && !isStep(allNodes.value[0])
   const node = createStep(explicitSteps + (hasImplicitLeadingStep ? 1 : 0) + 1)
 
-  nodes.value = [...nodes.value, node]
+  const next = [...allNodes.value, node]
+  // The new step is the last group; carry the canvas straight to it.
+  commitNodes(next, groupIntoSteps(next).length - 1)
   selectedUid.value = node._uid
 }
 
+// Removes a field, or a step marker — deleting a marker merges its fields into
+// the step above, the same as dragging the break away would.
 function removeField(uid) {
-  const index = nodes.value.findIndex((n) => n._uid === uid)
-  nodes.value = nodes.value.filter((n) => n._uid !== uid)
+  const next = allNodes.value.filter((n) => n._uid !== uid)
+  commitNodes(next)
 
   if (selectedUid.value === uid) {
-    const next = nodes.value[index] ?? nodes.value[index - 1] ?? null
-    selectedUid.value = next?._uid ?? null
+    // Fall back to the first field still visible in the (possibly clamped) step.
+    selectedUid.value = activeGroupFields()[0]?._uid ?? null
   }
 }
 
+// Move a field out of the step it is in and onto the end of another. The canvas
+// follows it to the target step so the move is visible, and the field stays
+// selected. Used by the properties "Step" menu and by dropping onto a tab.
+function moveFieldToStep(uid, targetIndex) {
+  const groups = groupIntoSteps(allNodes.value)
+  if (!groups[targetIndex]) return
+
+  let moved = null
+  for (const group of groups) {
+    const at = group.fields.findIndex((f) => f._uid === uid)
+    if (at >= 0) {
+      moved = group.fields.splice(at, 1)[0]
+      break
+    }
+  }
+  if (!moved) return
+
+  groups[targetIndex].fields.push(moved)
+  commitNodes(flattenGroups(groups), targetIndex)
+  selectedUid.value = uid
+}
+
+/** The step group the selected field lives in, as an index, or -1. */
+const selectedFieldStepIndex = computed(() => {
+  if (!selected.value || isStep(selected.value)) return -1
+  return stepGroups.value.findIndex((g) =>
+    g.fields.some((f) => f._uid === selected.value._uid)
+  )
+})
+
+/** Remove the selected step break and close the panel it was edited from. */
+function removeStep(uid) {
+  removeField(uid)
+  closeProperties()
+}
+
 function changeType(uid, nextType) {
-  nodes.value = nodes.value.map((n) => (n._uid === uid ? retypeNode(n, nextType) : n))
+  commitNodes(allNodes.value.map((n) => (n._uid === uid ? retypeNode(n, nextType) : n)))
 }
 
 function updateProp(uid, key, value) {
-  nodes.value = nodes.value.map((n) => (n._uid === uid ? { ...n, [key]: value } : n))
+  commitNodes(allNodes.value.map((n) => (n._uid === uid ? { ...n, [key]: value } : n)))
 }
 
 function removeProp(uid, key) {
-  nodes.value = nodes.value.map((n) => {
-    if (n._uid !== uid) return n
-    const { [key]: _removed, ...rest } = n
-    return rest
-  })
+  commitNodes(
+    allNodes.value.map((n) => {
+      if (n._uid !== uid) return n
+      const { [key]: _removed, ...rest } = n
+      return rest
+    })
+  )
 }
 
 /**
@@ -326,10 +482,10 @@ function removeProp(uid, key) {
 const conditionCandidates = computed(() => {
   if (!selected.value || isStep(selected.value)) return []
 
-  const group = groupIntoSteps(nodes.value).find((g) =>
+  const group = groupIntoSteps(allNodes.value).find((g) =>
     g.fields.some((f) => f._uid === selected.value._uid)
   )
-  const fields = group ? group.fields : nodes.value.filter((n) => !isStep(n))
+  const fields = group ? group.fields : allNodes.value.filter((n) => !isStep(n))
 
   return fields.filter((f) => f._uid !== selected.value._uid && (f.name ?? '').trim())
 })
@@ -530,12 +686,12 @@ async function generate() {
     // unsaved form, so drop any opened-form identity.
     currentFormId.value = null
     openFormId.value = ''
-    nodes.value = fromSchema(result.schema)
-    selectedUid.value = nodes.value.find((n) => !isStep(n))?._uid ?? null
+    commitNodes(fromSchema(result.schema), 0)
+    selectedUid.value = allNodes.value.find((n) => !isStep(n))?._uid ?? null
     formName.value = result.name ?? formName.value
     generateState.value = {
       status: 'done',
-      message: `Generated ${fieldCount(nodes.value)} fields.`,
+      message: `Generated ${fieldCount(allNodes.value)} fields.`,
     }
     // A successful generation is the end of page 1's job; carry the user to the
     // fields rather than leaving them on a prompt box that has already run.
@@ -569,10 +725,10 @@ function describeRefinement(before, after) {
 }
 
 async function refine() {
-  if (!refinePrompt.value.trim() || !nodes.value.length) return
+  if (!refinePrompt.value.trim() || !allNodes.value.length) return
 
   refineState.value = { status: 'working', message: 'Applying…' }
-  const before = fieldCount(nodes.value)
+  const before = fieldCount(allNodes.value)
 
   try {
     const res = await fetch(apiUrl('/forms/refine'), {
@@ -593,13 +749,15 @@ async function refine() {
     }
 
     const result = await res.json()
-    nodes.value = mergeSchema(nodes.value, result.schema)
+    // Keeps the canvas on the step it was on, clamped if the refinement removed
+    // steps from under it.
+    commitNodes(mergeSchema(allNodes.value, result.schema))
     formName.value = result.name ?? formName.value
 
     // Usually a no-op thanks to the uid merge, but the selected field may have
     // been the very thing the instruction removed.
-    if (!nodes.value.some((n) => n._uid === selectedUid.value)) {
-      selectedUid.value = nodes.value.find((n) => !isStep(n))?._uid ?? null
+    if (!allNodes.value.some((n) => n._uid === selectedUid.value)) {
+      selectedUid.value = allNodes.value.find((n) => !isStep(n))?._uid ?? null
     }
 
     // An instruction is spent once applied. Leaving it in the box invites a
@@ -607,7 +765,7 @@ async function refine() {
     refinePrompt.value = ''
     refineState.value = {
       status: 'done',
-      message: describeRefinement(before, fieldCount(nodes.value)),
+      message: describeRefinement(before, fieldCount(allNodes.value)),
     }
   } catch (err) {
     refineState.value = { status: 'error', message: err.message }
@@ -765,7 +923,7 @@ function handleSubmit(data) {
             type="button"
             class="primary"
             data-testid="refine-apply"
-            :disabled="refineState.status === 'working' || !refinePrompt.trim() || !nodes.length"
+            :disabled="refineState.status === 'working' || !refinePrompt.trim() || !allNodes.length"
             @click="refine"
           >
             {{ refineState.status === 'working' ? 'Applying…' : 'Apply change' }}
@@ -778,7 +936,7 @@ function handleSubmit(data) {
             {{ refineState.message }}
           </p>
           <p class="hint">
-            <template v-if="nodes.length">
+            <template v-if="allNodes.length">
               Changes the fields below rather than replacing them. Anything the
               instruction doesn't mention is left alone.
             </template>
@@ -815,34 +973,68 @@ function handleSubmit(data) {
       <!-- Layout canvas: the form as it will render, rearranged by dragging -->
       <section class="panel canvas-panel">
         <h2>Fields</h2>
+
+        <!--
+          One step at a time. With a break in the form the canvas below shows
+          only the active step's fields, so a long multi-step form is edited a
+          screenful at a time instead of as one list the length of the whole
+          thing. A field can be dragged onto another step's tab to move it there.
+        -->
+        <nav v-if="hasMultipleSteps" class="canvas-steps" aria-label="Form steps">
+          <div
+            v-for="(group, i) in stepGroups"
+            :key="group.step?._uid ?? 'lead'"
+            class="canvas-step"
+            :class="{
+              current: i === activeStepIndex,
+              'drop-target': i === dropTargetStep && i !== activeStepIndex,
+            }"
+            :data-testid="`canvas-step-${i}`"
+            @dragenter.prevent="onStepDragEnter(i)"
+            @dragover.prevent
+            @dragleave="onStepDragLeave(i)"
+            @drop.prevent="onStepDrop(i)"
+          >
+            <button type="button" class="canvas-step-switch" @click="setActiveStep(i)">
+              <span class="canvas-step-label">{{ stepLabel(group, i) }}</span>
+              <small>{{ group.fields.length }}</small>
+            </button>
+            <button
+              v-if="group.step"
+              type="button"
+              class="canvas-step-edit"
+              :aria-label="`Edit ${stepLabel(group, i)}`"
+              :data-testid="`canvas-step-edit-${i}`"
+              @click="openProperties(group.step._uid)"
+            >
+              ✎
+            </button>
+          </div>
+        </nav>
+
         <p class="hint">
           Drag a field to move it, or click it to edit its properties. Widths are
           set there too; a field that no longer fits its row wraps onto the next
-          one.
+          one.<template v-if="hasMultipleSteps"> Drag a field onto a step tab
+          above to move it to that step.</template>
         </p>
         <ul ref="listRef" class="field-canvas">
           <li
-            v-for="node in nodes"
+            v-for="node in stepFields"
             :key="node._uid"
             :class="[
               'canvas-card',
-              isStep(node)
-                ? 'col-span-12'
-                : `col-span-${node.columnSpan ?? DEFAULT_COLUMN_SPAN}`,
+              `col-span-${node.columnSpan ?? DEFAULT_COLUMN_SPAN}`,
               {
                 selected: node._uid === selectedUid,
-                'step-marker': isStep(node),
                 'dupe-name': duplicateNames.has(node.name),
               },
             ]"
             :data-uid="node._uid"
-            @pointerdown="onCardPointerDown"
+            @pointerdown="onCardPointerDown($event)"
             @click="onCardClick(node._uid, $event)"
           >
-            <span v-if="isStep(node)" class="step-rule">
-              Step break — {{ node.label }} <code>{{ node.name }}</code>
-            </span>
-            <FormKitSchema v-else :key="renderKey(node)" :schema="canvasSchema(node)" />
+            <FormKitSchema :key="renderKey(node)" :schema="canvasSchema(node)" />
 
             <!--
               Covers the rendered field so the card reads as one draggable
@@ -877,7 +1069,11 @@ function handleSubmit(data) {
             </span>
           </li>
         </ul>
-        <p v-if="!nodes.length" class="hint">Add a field to start laying out.</p>
+        <p v-if="!allNodes.length" class="hint">Add a field to start laying out.</p>
+        <p v-else-if="!stepFields.length" class="hint">
+          This step has no fields yet — add one from the palette, or drag a field
+          onto its tab.
+        </p>
         <p v-if="duplicateNames.size" class="error">
           Duplicate field names: {{ [...duplicateNames].join(', ') }}. The server
           will reject this form.
@@ -898,7 +1094,7 @@ function handleSubmit(data) {
       <section class="panel preview">
         <h2>Preview</h2>
         <FormKit
-          v-if="nodes.length"
+          v-if="allNodes.length"
           :key="previewKey"
           type="form"
           @submit="handleSubmit"
@@ -933,7 +1129,7 @@ function handleSubmit(data) {
         <button
           type="button"
           class="primary"
-          :disabled="!nodes.length || saveState.status === 'saving'"
+          :disabled="!allNodes.length || saveState.status === 'saving'"
           @click="save"
         >
           {{ saveState.status === 'saving' ? 'Saving…' : currentFormId ? 'Update form' : 'Save form' }}
@@ -979,9 +1175,19 @@ function handleSubmit(data) {
         </header>
 
         <div class="props-body">
-          <p v-if="isStep(selected)" class="hint">
-            Step break — everything below it, until the next break, forms one step.
-          </p>
+          <template v-if="isStep(selected)">
+            <p class="hint">
+              Step break — everything below it, until the next break, forms one step.
+            </p>
+            <button
+              type="button"
+              class="danger"
+              data-testid="prop-remove-step"
+              @click="removeStep(selected._uid)"
+            >
+              Remove this step
+            </button>
+          </template>
 
           <label v-else>
             Type
@@ -1004,6 +1210,20 @@ function handleSubmit(data) {
             >
               <option v-for="option in COLUMN_SPANS" :key="option.span" :value="option.span">
                 {{ option.label }}
+              </option>
+            </select>
+          </label>
+
+          <!-- Move a field to another step without dragging it there. -->
+          <label v-if="!isStep(selected) && hasMultipleSteps">
+            Step
+            <select
+              :value="selectedFieldStepIndex"
+              data-testid="prop-step"
+              @change="moveFieldToStep(selected._uid, Number($event.target.value))"
+            >
+              <option v-for="(group, i) in stepGroups" :key="group.step?._uid ?? 'lead'" :value="i">
+                {{ stepLabel(group, i) }}
               </option>
             </select>
           </label>
@@ -1202,6 +1422,94 @@ function handleSubmit(data) {
   background: #4a7adf;
 }
 
+/*
+ * Per-step tabs above the canvas — the switcher for a multi-step form's editor.
+ * Wrap rather than scroll (same reasoning as the preview's step strip), so a
+ * 12-step form's tabs stack into rows instead of hiding behind a scrollbar.
+ */
+.canvas-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+}
+
+.canvas-step {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.canvas-step.current {
+  border-color: #4a7adf;
+  background: #f7faff;
+}
+
+/* Highlighted while a field card is dragged over it, as the move's drop cue. */
+.canvas-step.drop-target {
+  border-color: #4a7;
+  background: #eefbf3;
+  box-shadow: 0 0 0 2px #b6e3c8;
+}
+
+.canvas-step-switch {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.4rem 0.7rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #444;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.canvas-step.current .canvas-step-switch {
+  color: #2b56b5;
+}
+
+.canvas-step-switch small {
+  font-size: 0.7rem;
+  color: #999;
+}
+
+/* The pencil that opens the step's own properties (rename, remove). */
+.canvas-step-edit {
+  padding: 0 0.55rem;
+  font-size: 0.8rem;
+  color: #999;
+  background: none;
+  border: none;
+  border-left: 1px solid #eee;
+  cursor: pointer;
+}
+
+.canvas-step-edit:hover {
+  color: #2b56b5;
+  background: #eef4ff;
+}
+
+/* Destructive action inside the properties panel (remove a step). */
+.danger {
+  align-self: flex-start;
+  padding: 0.4rem 0.8rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: #b00020;
+  background: #fff;
+  border: 1px solid #e3b7bf;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.danger:hover {
+  background: #fdf2f4;
+}
+
 .page-describe,
 .page-review {
   display: flex;
@@ -1252,9 +1560,18 @@ function handleSubmit(data) {
   min-width: 0;
 }
 
+.sidebar {
+  position: sticky;
+  top: 1rem;
+}
+
 @media (max-width: 900px) {
   .builder {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: static;
   }
 }
 
