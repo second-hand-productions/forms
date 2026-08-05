@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import FormBuilder from './components/FormBuilder.vue'
+import FormFill from './components/FormFill.vue'
 import ReportBuilder from './components/ReportBuilder.vue'
 
 // The app deliberately avoids a router (see the note in FormBuilder.vue); this
@@ -27,6 +28,16 @@ const view = ref('builder')
       <button
         type="button"
         class="nav-tab"
+        :class="{ current: view === 'fill' }"
+        :aria-current="view === 'fill' ? 'page' : undefined"
+        data-testid="nav-fill"
+        @click="view = 'fill'"
+      >
+        Fill form
+      </button>
+      <button
+        type="button"
+        class="nav-tab"
         :class="{ current: view === 'reports' }"
         :aria-current="view === 'reports' ? 'page' : undefined"
         data-testid="nav-reports"
@@ -44,10 +55,18 @@ const view = ref('builder')
       <FormBuilder />
     </template>
 
+    <template v-else-if="view === 'fill'">
+      <p class="lede">
+        Fill out a saved form and capture the response. Captured responses become
+        the real data a report can be rendered against.
+      </p>
+      <FormFill />
+    </template>
+
     <template v-else>
       <p class="lede">
-        Design a report template for a form, drop in fields, and preview it
-        filled with sample data. Export to PDF.
+        Design a report template for a form, drop in fields, and preview it filled
+        with a captured response — or sample data. Export to PDF.
       </p>
       <ReportBuilder />
     </template>

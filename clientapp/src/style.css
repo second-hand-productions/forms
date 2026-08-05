@@ -399,3 +399,53 @@ code {
 .formkit-options.options-horizontal > .formkit-option {
   margin-bottom: 0;
 }
+
+/*
+ * Multi-step tab strip: wrap instead of scroll.
+ *
+ * The addon lays every step tab out in one non-wrapping flex row with
+ * `overflow: auto`, so a form with many steps — a 12-step form is realistic
+ * here — pushes the later tabs off-screen behind a horizontal scrollbar. Letting
+ * the row wrap keeps every step visible and reachable at once, however many
+ * there are.
+ *
+ * Global, not scoped: these tabs are rendered by FormKit's multi-step addon in
+ * both the builder preview and the live FormFill, neither of which a scoped
+ * stylesheet reaches. Only the default `tab` style is in use (tabStyle defaults
+ * to 'tab'), so the chip treatment below is limited to that variant.
+ */
+.formkit-outer[data-type='multi-step'] > .formkit-wrapper > .formkit-tabs {
+  flex-wrap: wrap;
+  overflow: visible;
+  gap: 0.35rem;
+}
+
+/*
+ * The default style paints the whole strip as one connected bar (shared
+ * background, top-corner radius, box-shadow separators between tabs). That reads
+ * as a single broken row once it wraps, so drop the bar chrome and give each tab
+ * its own border — a wrapped set of chips instead. flex-grow is pinned off (the
+ * addon sets it to 1) so a final row holding a single tab keeps its natural
+ * width rather than stretching full width. The active tab keeps the addon's
+ * active background, so it still stands out.
+ */
+.formkit-outer[data-type='multi-step'] > [data-tab-style='tab'] > .formkit-tabs {
+  background: none;
+  border: none;
+  border-radius: 0;
+}
+
+.formkit-outer[data-type='multi-step']
+  > [data-tab-style='tab']
+  > .formkit-tabs
+  .formkit-tab,
+.formkit-outer[data-type='multi-step']
+  > [data-tab-style='tab']
+  > .formkit-tabs
+  .formkit-tab:last-child {
+  flex: 0 0 auto;
+  box-shadow: none;
+  border: 1px solid var(--multistep-color-border);
+  border-radius: var(--multistep-radius);
+  padding: 0.5rem 1rem;
+}

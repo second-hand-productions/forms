@@ -35,6 +35,35 @@ const selectedFormId = ref('') // which form this report binds to
 const fields = ref([]) // merge-field candidates for the selected form
 const mockData = ref({}) // sample values, keyed like a real submission
 
+const submissions = ref([]) // captured responses for the selected form
+const selectedSubmissionId = ref('') // '' = preview against sample data
+
+// The chosen response, or null for sample data. Its `data` is already the flat
+// merge-key map the renderer consumes — the same shape as mockData — so switching
+// between them needs no reshaping.
+const selectedSubmission = computed(() =>
+  submissions.value.find((s) => s.id === selectedSubmissionId.value) ?? null
+)
+
+// What the preview and PDF actually render against: a real captured response when
+// one is chosen, otherwise the sample data (the original behaviour, kept as a
+// fallback so a report with no responses yet still previews).
+const previewData = computed(() =>
+  selectedSubmission.value ? selectedSubmission.value.data : mockData.value
+)
+
+const previewSource = computed(() =>
+  selectedSubmission.value ? `captured ${formatWhen(selectedSubmission.value.createdAt)}` : 'sample data'
+)
+
+function formatWhen(iso) {
+  try {
+    return new Date(iso).toLocaleString()
+  } catch {
+    return iso
+  }
+}
+
 const templates = ref([]) // saved report templates
 const currentTemplateId = ref(null) // set once saved, so save becomes an update
 const openTemplateId = ref('') // bound to the "Open existing" picker
@@ -97,6 +126,11 @@ async function loadTemplates() {
 // The editor content is left alone: any field that no longer exists simply
 // renders a [missing] marker in the preview.
 watch(selectedFormId, async (id) => {
+  // A form change invalidates the previously chosen response — its fields, and so
+  // its merge keys, belong to the old form.
+  selectedSubmissionId.value = ''
+  submissions.value = []
+
   if (!id) {
     fields.value = []
     mockData.value = {}
@@ -104,27 +138,33 @@ watch(selectedFormId, async (id) => {
   }
 
   try {
-    const res = await fetch(apiUrl(`/forms/${id}`))
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const form = await res.json()
+    const [formRes, subsRes] = await Promise.all([
+      fetch(apiUrl(`/forms/${id}`)),
+      fetch(apiUrl(`/forms/${id}/submissions`)),
+    ])
+    if (!formRes.ok) throw new Error(`HTTP ${formRes.status}`)
+    const form = await formRes.json()
     fields.value = deriveFields(form.schema)
     mockData.value = buildMockData(fields.value)
+    submissions.value = subsRes.ok ? await subsRes.json() : []
   } catch {
     fields.value = []
     mockData.value = {}
+    submissions.value = []
   }
 })
 
 // --- preview ---------------------------------------------------------------
 
-// Rebuild the preview whenever the document or the sample data changes. Both the
-// Build and Review pages carry a preview host; each gets its own rendered copy,
-// since a single element can't be appended to two parents.
-watch([docJson, mockData], renderPreview, { deep: false })
+// Rebuild the preview whenever the document or the data it's filled with changes
+// (the sample data, or the chosen response). Both the Build and Review pages carry
+// a preview host; each gets its own rendered copy, since a single element can't be
+// appended to two parents.
+watch([docJson, previewData], renderPreview, { deep: false })
 
 function renderPreview() {
   for (const host of [buildPreviewRef.value, reviewPreviewRef.value]) {
-    if (host) host.replaceChildren(renderTemplate(docJson.value, mockData.value))
+    if (host) host.replaceChildren(renderTemplate(docJson.value, previewData.value))
   }
 }
 
@@ -377,7 +417,7 @@ async function downloadPdf() {
   // Render a fresh copy off-screen so preview styling (borders, chips) doesn't
   // bleed into the document. html2pdf pulls in html2canvas + jsPDF, so it's
   // loaded on demand rather than in the main bundle.
-  const element = renderTemplate(docJson.value, mockData.value)
+  const element = renderTemplate(docJson.value, previewData.value)
   element.classList.add('pdf-page')
 
   const { default: html2pdf } = await import('html2pdf.js')
@@ -633,7 +673,20 @@ async function downloadPdf() {
         <section class="preview-pane">
           <header class="preview-head">
             <h3>Preview</h3>
-            <small>Filled with sample data</small>
+            <label class="preview-source">
+              <span>Filled with</span>
+              <select
+                v-model="selectedSubmissionId"
+                data-testid="submission-picker"
+                :disabled="!hasForm"
+                :title="hasForm ? 'Choose which data to preview' : 'Choose a form first'"
+              >
+                <option value="">Sample data</option>
+                <option v-for="s in submissions" :key="s.id" :value="s.id">
+                  Captured {{ formatWhen(s.createdAt) }}
+                </option>
+              </select>
+            </label>
           </header>
           <div ref="buildPreviewRef" class="preview" data-testid="report-preview"></div>
         </section>
@@ -652,7 +705,19 @@ async function downloadPdf() {
       <section class="panel preview-pane">
         <header class="preview-head">
           <h3>Preview</h3>
-          <small>Filled with sample data</small>
+          <label class="preview-source">
+            <span>Filled with</span>
+            <select
+              v-model="selectedSubmissionId"
+              data-testid="submission-picker-review"
+              :disabled="!hasForm"
+            >
+              <option value="">Sample data</option>
+              <option v-for="s in submissions" :key="s.id" :value="s.id">
+                Captured {{ formatWhen(s.createdAt) }}
+              </option>
+            </select>
+          </label>
         </header>
         <div ref="reviewPreviewRef" class="preview" data-testid="report-preview-review"></div>
       </section>
@@ -1023,6 +1088,30 @@ h2 {
 
 .preview-head small {
   color: #888;
+}
+
+/* Picks which data the preview renders against: sample, or a captured response. */
+.preview-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: #888;
+}
+
+.preview-source select {
+  padding: 0.2rem 0.35rem;
+  border: 1px solid #ccc;
+  border-radius: 0.3rem;
+  font: inherit;
+  font-size: 0.78rem;
+  color: #444;
+}
+
+.preview-source select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .preview {
