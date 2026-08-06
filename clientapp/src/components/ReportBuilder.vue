@@ -5,6 +5,7 @@ import StarterKit from '@tiptap/starter-kit'
 import { apiUrl } from '../api.js'
 import { MergeField } from '../report/mergeFieldExtension.js'
 import { BlockRef } from '../report/blockRefExtension.js'
+import { Image } from '../report/imageExtension.js'
 import { deriveFields, buildMockData } from '../report/mockData.js'
 import { renderTemplate, collectBlockRefIds } from '../report/renderTemplate.js'
 
@@ -81,6 +82,22 @@ const snippetName = ref('') // name for a snippet being saved
 const snippetKind = ref('snippet') // header | footer | snippet
 const snippetState = ref({ status: 'idle', message: '' })
 
+// Uploaded image assets (logos, letterheads, branding). A report's image node
+// references an asset by id; the renderer builds the src from the id.
+const assets = ref([]) // {id, name, mediaType, sizeBytes} from GET /api/assets
+const insertAssetId = ref('') // bound to the insert-image picker
+const imageInputRef = ref(null) // the upload file input, so it can be cleared
+const imageState = ref({ status: 'idle', message: '' })
+
+// Client-side pre-check mirroring the server's allowlist and caps, so an
+// unsupported or oversized file fails fast without a round-trip.
+const IMAGE_TYPES = {
+  'image/png': 5,
+  'image/jpeg': 5,
+  'image/gif': 5,
+  'image/webp': 5,
+}
+
 const SNIPPET_KINDS = [
   { value: 'header', label: 'Header' },
   { value: 'footer', label: 'Footer' },
@@ -105,7 +122,7 @@ const hasForm = computed(() => Boolean(selectedFormId.value))
 // useEditor stores the instance in a shallowRef and destroys it on unmount, so
 // Vue's reactivity never proxies ProseMirror's internal state.
 const editor = useEditor({
-  extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3] } }), MergeField, BlockRef],
+  extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3] } }), MergeField, BlockRef, Image],
   content: emptyDoc(),
   onCreate: ({ editor }) => {
     docJson.value = editor.getJSON()
@@ -122,7 +139,7 @@ function emptyDoc() {
 // --- data loading ----------------------------------------------------------
 
 onMounted(async () => {
-  await Promise.all([loadForms(), loadTemplates(), loadBlocks()])
+  await Promise.all([loadForms(), loadTemplates(), loadBlocks(), loadAssets()])
 })
 
 async function loadForms() {
@@ -152,6 +169,16 @@ async function loadBlocks() {
     blocks.value = await res.json()
   } catch {
     blocks.value = []
+  }
+}
+
+async function loadAssets() {
+  try {
+    const res = await fetch(apiUrl('/assets'))
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    assets.value = await res.json()
+  } catch {
+    assets.value = []
   }
 }
 
@@ -466,6 +493,67 @@ async function saveAsSnippet() {
   }
 }
 
+// --- image assets ----------------------------------------------------------
+
+// Insert an already-uploaded image at the cursor by asset id. The alt defaults to
+// the asset name for accessibility; the renderer builds the src from the id.
+function insertSelectedAsset() {
+  const id = insertAssetId.value
+  insertAssetId.value = ''
+  if (!id || !editor.value) return
+
+  const asset = assets.value.find((a) => a.id === id)
+  chain().insertImage({ assetId: id, alt: asset?.name ?? null }).run()
+  imageState.value = { status: 'idle', message: '' }
+}
+
+// Upload a chosen file, then drop it into the document. Reuses readFileAsBase64
+// (the same helper the AI attachment path uses) and the server-mirrored allowlist.
+async function onImageUpload(event) {
+  const file = event.target.files?.[0]
+  if (!file || !editor.value) return
+
+  const maxMb = IMAGE_TYPES[file.type]
+  if (!maxMb) {
+    clearImageInput()
+    imageState.value = { status: 'error', message: 'Upload a PNG, JPEG, GIF or WebP image.' }
+    return
+  }
+  if (file.size > maxMb * 1024 * 1024) {
+    clearImageInput()
+    imageState.value = { status: 'error', message: `That image is over ${maxMb} MB.` }
+    return
+  }
+
+  imageState.value = { status: 'uploading', message: 'Uploading…' }
+  try {
+    const data = await readFileAsBase64(file)
+    const res = await fetch(apiUrl('/assets'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, mediaType: file.type, data }),
+    })
+
+    if (!res.ok) {
+      const problem = await res.json().catch(() => null)
+      throw new Error(problem?.detail ?? `HTTP ${res.status}`)
+    }
+
+    const asset = await res.json()
+    await loadAssets()
+    chain().insertImage({ assetId: asset.id, alt: asset.name }).run()
+    clearImageInput()
+    imageState.value = { status: 'done', message: `Inserted ${asset.name}.` }
+  } catch (err) {
+    clearImageInput()
+    imageState.value = { status: 'error', message: err.message }
+  }
+}
+
+function clearImageInput() {
+  if (imageInputRef.value) imageInputRef.value.value = ''
+}
+
 // --- persistence -----------------------------------------------------------
 
 function newReport() {
@@ -773,6 +861,53 @@ async function downloadPdf() {
           header), or save the whole document. Insert drops a live reference —
           editing the snippet later updates every report that references it. Use
           <em>Detach</em> on a reference to turn it into an editable copy.
+        </p>
+      </section>
+
+      <!-- Branding images: upload a logo/letterhead, or drop in an uploaded one -->
+      <section class="panel images">
+        <h2>Images</h2>
+        <div class="image-controls">
+          <label class="field image-insert">
+            <span>Insert an uploaded image</span>
+            <select
+              v-model="insertAssetId"
+              data-testid="insert-image"
+              :disabled="assets.length === 0"
+              :title="assets.length ? 'Insert an uploaded image at the cursor' : 'No images uploaded yet'"
+              @change="insertSelectedAsset"
+            >
+              <option value="" disabled>
+                {{ assets.length ? 'Insert image…' : 'No images uploaded yet' }}
+              </option>
+              <option v-for="a in assets" :key="a.id" :value="a.id">{{ a.name }}</option>
+            </select>
+          </label>
+
+          <label class="file-label image-upload">
+            <input
+              ref="imageInputRef"
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              data-testid="upload-image"
+              :disabled="imageState.status === 'uploading'"
+              @change="onImageUpload"
+            />
+            <span>{{ imageState.status === 'uploading' ? 'Uploading…' : 'Upload an image' }}</span>
+          </label>
+        </div>
+
+        <p
+          v-if="imageState.message"
+          :class="imageState.status === 'error' ? 'error' : 'ok'"
+          data-testid="image-status"
+        >
+          {{ imageState.message }}
+        </p>
+        <p class="hint">
+          Upload a logo or letterhead (PNG, JPEG, GIF or WebP, up to 5 MB) — it's
+          inserted where the cursor is and added to the library to reuse. Combine
+          with a snippet to build a branded header once and reference it everywhere.
         </p>
       </section>
 
@@ -1199,6 +1334,37 @@ h2 {
 
 .snippet-kind {
   min-width: 7rem;
+}
+
+/* The image library controls, mirroring the snippet controls. */
+.images {
+  margin-bottom: 1rem;
+}
+
+.image-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  align-items: flex-end;
+}
+
+.image-controls .field {
+  margin-bottom: 0;
+}
+
+.image-insert {
+  min-width: 16rem;
+}
+
+.image-upload {
+  gap: 0.4rem;
+}
+
+/* Keep an inserted image within the editor column; the preview/PDF constrain it
+   inline (see renderTemplate). */
+.editor :deep(.report-image) {
+  max-width: 100%;
+  height: auto;
 }
 
 .workspace {

@@ -43,7 +43,7 @@ public static class ReportTemplateValidator
     private static readonly HashSet<string> AllowedNodeTypes = new(StringComparer.Ordinal)
     {
         "doc", "paragraph", "text", "heading", "hardBreak",
-        "bulletList", "orderedList", "listItem", "mergeField",
+        "bulletList", "orderedList", "listItem", "mergeField", "image",
     };
 
     /// <summary>Inline formatting marks permitted on text nodes.</summary>
@@ -190,11 +190,11 @@ public static class ReportTemplateValidator
             return false;
         }
 
-        // blockRef is atomic — the referenced block supplies the content, so the
-        // reference node itself carries none.
-        if (type == "blockRef" && node.TryGetProperty("content", out _))
+        // blockRef and image are atomic — a blockRef's content comes from the
+        // referenced block, an image is a leaf — so neither carries child content.
+        if ((type == "blockRef" || type == "image") && node.TryGetProperty("content", out _))
         {
-            error = $"Node {path} (\"blockRef\") may not have child content.";
+            error = $"Node {path} (\"{type}\") may not have child content.";
             return false;
         }
 
@@ -286,6 +286,13 @@ public static class ReportTemplateValidator
                 return false;
             }
 
+            // image without attrs has no source.
+            if (type == "image")
+            {
+                error = $"Node {path} (\"image\") must have an \"assetId\" attribute.";
+                return false;
+            }
+
             return true;
         }
 
@@ -324,6 +331,9 @@ public static class ReportTemplateValidator
 
             case "blockRef":
                 return TryValidateBlockRefAttrs(attrs, path, out error);
+
+            case "image":
+                return TryValidateImageAttrs(attrs, path, out error);
 
             default:
                 // Reject any unexpected attribute keys; ignore an empty attrs bag,
@@ -446,6 +456,68 @@ public static class ReportTemplateValidator
         if (!hasId)
         {
             error = $"Node {path} (\"blockRef\") must have a non-empty \"id\".";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Validates an <c>image</c> node's attrs: a required non-empty <c>assetId</c>
+    /// (the asset's Guid as a bounded opaque string — the renderer builds the src
+    /// from it, so an unresolvable id just renders nothing) and an optional
+    /// <c>alt</c>. Crucially there is no <c>src</c> attribute: the source is always
+    /// derived from the id, never taken from stored content, so a template can
+    /// never smuggle in an arbitrary or off-site image URL.
+    /// </summary>
+    private static bool TryValidateImageAttrs(JsonElement attrs, string path, out string error)
+    {
+        error = string.Empty;
+
+        var hasAssetId = false;
+
+        foreach (var attr in attrs.EnumerateObject())
+        {
+            if (attr.Name is not ("assetId" or "alt"))
+            {
+                error = $"Node {path} (\"image\") has unsupported attribute \"{attr.Name}\".";
+                return false;
+            }
+
+            // alt may be null (decorative); assetId is a required string.
+            if (attr.Value.ValueKind == JsonValueKind.Null)
+            {
+                if (attr.Name == "assetId")
+                {
+                    error = $"Node {path} (\"image\") \"assetId\" may not be null.";
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (attr.Value.ValueKind != JsonValueKind.String)
+            {
+                error = $"Node {path} (\"image\") attribute \"{attr.Name}\" must be a string.";
+                return false;
+            }
+
+            if (attr.Value.GetString()!.Length > MaxAttrStringLength)
+            {
+                error = $"Node {path} (\"image\") attribute \"{attr.Name}\" "
+                    + $"exceeds {MaxAttrStringLength} characters.";
+                return false;
+            }
+
+            if (attr.Name == "assetId" && !string.IsNullOrWhiteSpace(attr.Value.GetString()))
+            {
+                hasAssetId = true;
+            }
+        }
+
+        if (!hasAssetId)
+        {
+            error = $"Node {path} (\"image\") must have a non-empty \"assetId\".";
             return false;
         }
 

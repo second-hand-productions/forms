@@ -23,6 +23,7 @@ builder.Services.AddSingleton<IFormStore>(_ => new SqlServerFormStore(formsConne
 builder.Services.AddSingleton<IReportTemplateStore>(_ => new SqlServerReportTemplateStore(formsConnectionString));
 builder.Services.AddSingleton<IFormSubmissionStore>(_ => new SqlServerFormSubmissionStore(formsConnectionString));
 builder.Services.AddSingleton<IBlockStore>(_ => new SqlServerBlockStore(formsConnectionString));
+builder.Services.AddSingleton<IAssetStore>(_ => new SqlServerAssetStore(formsConnectionString));
 
 // AI generation is optional — the app runs fully without a key, and the
 // /api/forms/generate endpoint reports 503 rather than the app failing to start.

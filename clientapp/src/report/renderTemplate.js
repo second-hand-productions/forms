@@ -1,3 +1,5 @@
+import { apiUrl } from '../api.js'
+
 // Render a TipTap document to DOM, filling merge fields from a submission's data.
 //
 // This walks the document JSON and builds real DOM nodes rather than an HTML
@@ -91,6 +93,24 @@ function renderBlockRef(node, dataMap, blockMap) {
   return fragment
 }
 
+// An uploaded image asset. The src is always built from the asset id served by
+// the API — never taken from stored content — so a template can only ever point
+// at an asset by id, not at an arbitrary URL. An id that no longer resolves just
+// renders a broken-image element (the asset was deleted); missing id renders
+// nothing.
+function renderImage(node) {
+  const assetId = node.attrs?.assetId
+  if (!assetId) return null
+
+  const img = document.createElement('img')
+  img.src = apiUrl(`/assets/${assetId}/content`)
+  if (node.attrs?.alt) img.alt = node.attrs.alt
+  // Self-contained sizing so the exported PDF (rendered detached from the app's
+  // stylesheet) keeps the image within the page width.
+  img.setAttribute('style', 'max-width: 100%; height: auto;')
+  return img
+}
+
 function renderText(node) {
   let el = document.createTextNode(node.text ?? '')
 
@@ -117,6 +137,9 @@ function renderNode(node, dataMap, blockMap) {
 
     case 'blockRef':
       return renderBlockRef(node, dataMap, blockMap)
+
+    case 'image':
+      return renderImage(node)
 
     case 'hardBreak':
       return document.createElement('br')
