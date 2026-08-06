@@ -136,7 +136,8 @@ public class BlocksController(IBlockStore store, IFormStore forms) : ControllerB
         content = request.Content.Value;
         // A block is a report-content document, validated by the very same
         // deny-by-default rules — so a snippet can never carry a node a template
-        // itself couldn't.
-        return ReportTemplateValidator.TryValidate(content, out error);
+        // itself couldn't. allowBlockRefs: false additionally refuses a snippet
+        // that references another snippet, keeping transclusion one level deep.
+        return ReportTemplateValidator.TryValidate(content, allowBlockRefs: false, out error);
     }
 }

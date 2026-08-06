@@ -321,6 +321,7 @@ public class ReportTemplatesController(
         }
 
         content = request.Content.Value;
-        return ReportTemplateValidator.TryValidate(content, out error);
+        // Templates may carry live snippet references (blockRef nodes).
+        return ReportTemplateValidator.TryValidate(content, allowBlockRefs: true, out error);
     }
 }

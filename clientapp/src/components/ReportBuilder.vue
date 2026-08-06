@@ -4,8 +4,9 @@ import { useEditor, EditorContent } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { apiUrl } from '../api.js'
 import { MergeField } from '../report/mergeFieldExtension.js'
+import { BlockRef } from '../report/blockRefExtension.js'
 import { deriveFields, buildMockData } from '../report/mockData.js'
-import { renderTemplate } from '../report/renderTemplate.js'
+import { renderTemplate, collectBlockRefIds } from '../report/renderTemplate.js'
 
 /**
  * The report builder is the same three-page flow as the form builder: describe,
@@ -68,10 +69,13 @@ const templates = ref([]) // saved report templates
 const currentTemplateId = ref(null) // set once saved, so save becomes an update
 const openTemplateId = ref('') // bound to the "Open existing" picker
 
-// Reusable content blocks (snippets, headers, footers). Phase 1 reuse is copy-in:
-// inserting one splices its nodes into the document, so there is nothing to
-// resolve at render time — a later phase can layer live references on top.
+// Reusable content blocks (snippets, headers, footers). Inserting one drops a
+// live reference (a blockRef node) that transcludes the block at render time, so
+// editing the block updates every report referencing it. `blockMap` holds the
+// resolved content of the blocks the current document references, keyed by id —
+// what renderTemplate reads to draw them.
 const blocks = ref([]) // {id, name, kind, formId} from GET /api/blocks
+const blockMap = ref({}) // id -> block `content` (doc), for referenced blocks
 const insertBlockId = ref('') // bound to the insert-snippet picker
 const snippetName = ref('') // name for a snippet being saved
 const snippetKind = ref('snippet') // header | footer | snippet
@@ -101,7 +105,7 @@ const hasForm = computed(() => Boolean(selectedFormId.value))
 // useEditor stores the instance in a shallowRef and destroys it on unmount, so
 // Vue's reactivity never proxies ProseMirror's internal state.
 const editor = useEditor({
-  extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3] } }), MergeField],
+  extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3] } }), MergeField, BlockRef],
   content: emptyDoc(),
   onCreate: ({ editor }) => {
     docJson.value = editor.getJSON()
@@ -185,15 +189,46 @@ watch(selectedFormId, async (id) => {
 
 // --- preview ---------------------------------------------------------------
 
-// Rebuild the preview whenever the document or the data it's filled with changes
-// (the sample data, or the chosen response). Both the Build and Review pages carry
-// a preview host; each gets its own rendered copy, since a single element can't be
+// Rebuild the preview whenever the document, the data it's filled with, or the
+// resolved snippet content changes. Both the Build and Review pages carry a
+// preview host; each gets its own rendered copy, since a single element can't be
 // appended to two parents.
-watch([docJson, previewData], renderPreview, { deep: false })
+watch([docJson, previewData, blockMap], renderPreview, { deep: false })
+
+// When the document changes, make sure every snippet it references is resolved.
+// blockMap updating retriggers the preview watch above, so a freshly inserted
+// reference fills in as soon as its block is fetched.
+watch(docJson, (doc) => resolveBlockRefs(doc))
 
 function renderPreview() {
   for (const host of [buildPreviewRef.value, reviewPreviewRef.value]) {
-    if (host) host.replaceChildren(renderTemplate(docJson.value, previewData.value))
+    if (host) host.replaceChildren(renderTemplate(docJson.value, previewData.value, blockMap.value))
+  }
+}
+
+// Fetch the content of any referenced block not already in blockMap. Only the
+// newly-referenced ids are fetched, so typing (which doesn't change the id set)
+// costs nothing; a reference whose block can't be fetched is left unresolved and
+// renders a [missing snippet] marker until it resolves.
+async function resolveBlockRefs(doc) {
+  const ids = collectBlockRefIds(doc)
+  const missing = [...ids].filter((id) => !(id in blockMap.value))
+  if (!missing.length) return
+
+  const additions = {}
+  await Promise.all(
+    missing.map(async (id) => {
+      try {
+        const res = await fetch(apiUrl(`/blocks/${id}`))
+        if (res.ok) additions[id] = (await res.json()).content
+      } catch {
+        // Leave unresolved; the preview shows a missing-snippet marker.
+      }
+    })
+  )
+
+  if (Object.keys(additions).length) {
+    blockMap.value = { ...blockMap.value, ...additions }
   }
 }
 
@@ -367,25 +402,20 @@ function insertSelectedField() {
 
 // --- reusable blocks (snippets) --------------------------------------------
 
-// Insert a saved block at the cursor by copying its nodes in — a plain paste of
-// the block's content, not a live link. The block's own merge fields come along
-// and resolve against whatever form this report is on (a [missing] marker if the
-// block was authored against different fields), exactly as hand-inserted fields do.
-async function insertSelectedBlock() {
+// Insert a live reference to a saved block at the cursor. The document stores only
+// the block's id (plus its name, cached for the editor chip); the content is
+// resolved and rendered in the preview via blockMap, and re-editing the block
+// later changes this report too. Use Detach (on the chip) to turn a reference into
+// an editable copy. The block's own merge fields resolve against whatever form
+// this report is on, a [missing] marker if it was authored against other fields.
+function insertSelectedBlock() {
   const id = insertBlockId.value
   insertBlockId.value = ''
   if (!id || !editor.value) return
 
-  try {
-    const res = await fetch(apiUrl(`/blocks/${id}`))
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const block = await res.json()
-    const nodes = block.content?.content ?? []
-    if (nodes.length) chain().insertContent(nodes).run()
-    snippetState.value = { status: 'idle', message: '' }
-  } catch (err) {
-    snippetState.value = { status: 'error', message: err.message }
-  }
+  const block = blocks.value.find((b) => b.id === id)
+  chain().insertBlockRef({ id, name: block?.name ?? null }).run()
+  snippetState.value = { status: 'idle', message: '' }
 }
 
 // The document to save as a snippet: the current selection if there is one (so a
@@ -517,7 +547,7 @@ async function downloadPdf() {
   // Render a fresh copy off-screen so preview styling (borders, chips) doesn't
   // bleed into the document. html2pdf pulls in html2canvas + jsPDF, so it's
   // loaded on demand rather than in the main bundle.
-  const element = renderTemplate(docJson.value, previewData.value)
+  const element = renderTemplate(docJson.value, previewData.value, blockMap.value)
   element.classList.add('pdf-page')
 
   const { default: html2pdf } = await import('html2pdf.js')
@@ -740,8 +770,9 @@ async function downloadPdf() {
         </p>
         <p class="hint">
           Select part of the document to save just that (e.g. the client-info
-          header), or save the whole document. Insert drops a copy at the cursor —
-          later edits to a snippet don't change reports already built from it.
+          header), or save the whole document. Insert drops a live reference —
+          editing the snippet later updates every report that references it. Use
+          <em>Detach</em> on a reference to turn it into an editable copy.
         </p>
       </section>
 

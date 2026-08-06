@@ -16,6 +16,14 @@ namespace forms.Validation;
 /// The renderer never injects raw HTML: text and merge values become DOM text
 /// nodes, escaped by construction. So there is no <c>$</c>-expression hazard as
 /// in FormKit; the checks here are about structure and size, not evaluation.
+///
+/// <para><b>blockRef.</b> A <c>blockRef</c> node is a live reference to a reusable
+/// <see cref="forms.Models.Block"/>, resolved and rendered inline at render time.
+/// It is accepted only when <c>allowBlockRefs</c> is set — true for report
+/// templates, false for blocks themselves. Rejecting it inside a block is what
+/// keeps transclusion one level deep: a block cannot reference another block, so
+/// there are no reference cycles and the client resolves the reference map in a
+/// single fetch pass.</para>
 /// </summary>
 public static class ReportTemplateValidator
 {
@@ -27,7 +35,11 @@ public static class ReportTemplateValidator
     /// few levels of nested lists. Nothing legitimate goes deeper.</summary>
     private const int MaxDepth = 20;
 
-    /// <summary>Node types the editor can produce and the renderer knows how to draw.</summary>
+    /// <summary>
+    /// Node types the editor can produce and the renderer knows how to draw.
+    /// <c>blockRef</c> is deliberately absent: it is allowed conditionally (see the
+    /// type check in <c>TryValidateNode</c>), gated on <c>allowBlockRefs</c>.
+    /// </summary>
     private static readonly HashSet<string> AllowedNodeTypes = new(StringComparer.Ordinal)
     {
         "doc", "paragraph", "text", "heading", "hardBreak",
@@ -49,7 +61,12 @@ public static class ReportTemplateValidator
     private const int MinHeadingLevel = 1;
     private const int MaxHeadingLevel = 3;
 
-    public static bool TryValidate(JsonElement content, out string error)
+    /// <param name="allowBlockRefs">
+    /// Whether <c>blockRef</c> (live snippet reference) nodes are permitted. True
+    /// for report templates; false for block content, so a block cannot reference
+    /// another block.
+    /// </param>
+    public static bool TryValidate(JsonElement content, bool allowBlockRefs, out string error)
     {
         error = string.Empty;
 
@@ -70,13 +87,14 @@ public static class ReportTemplateValidator
         // Budget is shared across the whole tree, not per level, so nesting
         // cannot multiply the effective node allowance.
         var budget = MaxNodes;
-        return TryValidateNode(content, path: "doc", depth: 1, ref budget, out error);
+        return TryValidateNode(content, path: "doc", depth: 1, allowBlockRefs, ref budget, out error);
     }
 
     private static bool TryValidateNode(
         JsonElement node,
         string path,
         int depth,
+        bool allowBlockRefs,
         ref int budget,
         out string error)
     {
@@ -108,7 +126,18 @@ public static class ReportTemplateValidator
         }
 
         var type = typeProp.GetString()!;
-        if (!AllowedNodeTypes.Contains(type))
+        if (type == "blockRef")
+        {
+            // A live snippet reference. Permitted in templates, refused inside a
+            // block — that refusal is what keeps transclusion one level deep.
+            if (!allowBlockRefs)
+            {
+                error = $"Node {path} is a snippet reference, which a snippet may "
+                    + "not itself contain — detach it first.";
+                return false;
+            }
+        }
+        else if (!AllowedNodeTypes.Contains(type))
         {
             error = $"Node {path} uses unsupported type \"{type}\".";
             return false;
@@ -161,6 +190,14 @@ public static class ReportTemplateValidator
             return false;
         }
 
+        // blockRef is atomic — the referenced block supplies the content, so the
+        // reference node itself carries none.
+        if (type == "blockRef" && node.TryGetProperty("content", out _))
+        {
+            error = $"Node {path} (\"blockRef\") may not have child content.";
+            return false;
+        }
+
         if (!TryValidateAttrs(node, type, path, out error))
         {
             return false;
@@ -177,7 +214,7 @@ public static class ReportTemplateValidator
             var index = 0;
             foreach (var child in contentProp.EnumerateArray())
             {
-                if (!TryValidateNode(child, $"{path}.{index}", depth + 1, ref budget, out error))
+                if (!TryValidateNode(child, $"{path}.{index}", depth + 1, allowBlockRefs, ref budget, out error))
                 {
                     return false;
                 }
@@ -242,6 +279,13 @@ public static class ReportTemplateValidator
                 return false;
             }
 
+            // blockRef without attrs has no target.
+            if (type == "blockRef")
+            {
+                error = $"Node {path} (\"blockRef\") must have an \"id\" attribute.";
+                return false;
+            }
+
             return true;
         }
 
@@ -277,6 +321,9 @@ public static class ReportTemplateValidator
 
             case "mergeField":
                 return TryValidateMergeFieldAttrs(attrs, path, out error);
+
+            case "blockRef":
+                return TryValidateBlockRefAttrs(attrs, path, out error);
 
             default:
                 // Reject any unexpected attribute keys; ignore an empty attrs bag,
@@ -339,6 +386,66 @@ public static class ReportTemplateValidator
         if (!hasName)
         {
             error = $"Node {path} (\"mergeField\") must have a non-empty \"name\".";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Validates a <c>blockRef</c> node's attrs: a required non-empty <c>id</c>
+    /// (the block's Guid, kept as a bounded opaque string — the renderer treats an
+    /// id it can't resolve as a missing block, so no GUID parsing is needed here)
+    /// and an optional <c>name</c> cached for display.
+    /// </summary>
+    private static bool TryValidateBlockRefAttrs(JsonElement attrs, string path, out string error)
+    {
+        error = string.Empty;
+
+        var hasId = false;
+
+        foreach (var attr in attrs.EnumerateObject())
+        {
+            if (attr.Name is not ("id" or "name"))
+            {
+                error = $"Node {path} (\"blockRef\") has unsupported attribute \"{attr.Name}\".";
+                return false;
+            }
+
+            // name may be null (display-only); id is a required string.
+            if (attr.Value.ValueKind == JsonValueKind.Null)
+            {
+                if (attr.Name == "id")
+                {
+                    error = $"Node {path} (\"blockRef\") \"id\" may not be null.";
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (attr.Value.ValueKind != JsonValueKind.String)
+            {
+                error = $"Node {path} (\"blockRef\") attribute \"{attr.Name}\" must be a string.";
+                return false;
+            }
+
+            if (attr.Value.GetString()!.Length > MaxAttrStringLength)
+            {
+                error = $"Node {path} (\"blockRef\") attribute \"{attr.Name}\" "
+                    + $"exceeds {MaxAttrStringLength} characters.";
+                return false;
+            }
+
+            if (attr.Name == "id" && !string.IsNullOrWhiteSpace(attr.Value.GetString()))
+            {
+                hasId = true;
+            }
+        }
+
+        if (!hasId)
+        {
+            error = $"Node {path} (\"blockRef\") must have a non-empty \"id\".";
             return false;
         }
 

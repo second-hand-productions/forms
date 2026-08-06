@@ -67,6 +67,30 @@ function formatValue(value) {
   return String(value)
 }
 
+// A live snippet reference. The referenced block's document is looked up in
+// blockMap (id -> block `doc`, resolved by the caller) and its content rendered
+// inline against the same data. A block cannot itself contain a blockRef (the
+// server refuses it), so this never recurses into another reference — no cycle
+// guard is needed. An id that doesn't resolve (block deleted, or not yet loaded)
+// shows a visible marker, mirroring how a missing merge field is handled.
+function renderBlockRef(node, dataMap, blockMap) {
+  const id = node.attrs?.id
+  const block = id ? blockMap?.[id] : null
+
+  if (!block) {
+    const span = document.createElement('span')
+    span.className = 'merge-missing'
+    span.textContent = `[missing snippet: ${node.attrs?.name || id || 'block'}]`
+    return span
+  }
+
+  // The block is a `doc`; splice its children in via a fragment so the reference
+  // adds no wrapper element of its own to the output.
+  const fragment = document.createDocumentFragment()
+  appendChildren(fragment, block, dataMap, blockMap)
+  return fragment
+}
+
 function renderText(node) {
   let el = document.createTextNode(node.text ?? '')
 
@@ -83,7 +107,7 @@ function renderText(node) {
   return el
 }
 
-function renderNode(node, dataMap) {
+function renderNode(node, dataMap, blockMap) {
   switch (node?.type) {
     case 'text':
       return renderText(node)
@@ -91,25 +115,28 @@ function renderNode(node, dataMap) {
     case 'mergeField':
       return renderMergeField(node, dataMap)
 
+    case 'blockRef':
+      return renderBlockRef(node, dataMap, blockMap)
+
     case 'hardBreak':
       return document.createElement('br')
 
     case 'paragraph':
-      return renderContainer('p', node, dataMap)
+      return renderContainer('p', node, dataMap, blockMap)
 
     case 'heading': {
       const level = HEADING_LEVELS.has(node.attrs?.level) ? node.attrs.level : 1
-      return renderContainer(`h${level}`, node, dataMap)
+      return renderContainer(`h${level}`, node, dataMap, blockMap)
     }
 
     case 'bulletList':
-      return renderContainer('ul', node, dataMap)
+      return renderContainer('ul', node, dataMap, blockMap)
 
     case 'orderedList':
-      return renderContainer('ol', node, dataMap)
+      return renderContainer('ol', node, dataMap, blockMap)
 
     case 'listItem':
-      return renderContainer('li', node, dataMap)
+      return renderContainer('li', node, dataMap, blockMap)
 
     default:
       // Unknown types can't appear in validated content, but stay defensive:
@@ -118,32 +145,54 @@ function renderNode(node, dataMap) {
   }
 }
 
-function renderContainer(tag, node, dataMap) {
+function renderContainer(tag, node, dataMap, blockMap) {
   const el = document.createElement(tag)
   if (BLOCK_STYLES[tag]) el.setAttribute('style', BLOCK_STYLES[tag])
-  appendChildren(el, node, dataMap)
+  appendChildren(el, node, dataMap, blockMap)
   return el
 }
 
-function appendChildren(el, node, dataMap) {
+function appendChildren(el, node, dataMap, blockMap) {
   for (const child of node?.content ?? []) {
-    const rendered = renderNode(child, dataMap)
+    const rendered = renderNode(child, dataMap, blockMap)
     if (rendered) el.appendChild(rendered)
   }
+}
+
+/**
+ * Collect the ids of every blockRef (live snippet reference) in a doc, so the
+ * caller can fetch those blocks and build the blockMap renderTemplate consumes.
+ * Returns a Set; a doc with no references yields an empty one.
+ */
+export function collectBlockRefIds(doc) {
+  const ids = new Set()
+
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (node.type === 'blockRef' && node.attrs?.id) ids.add(node.attrs.id)
+    for (const child of node.content ?? []) walk(child)
+  }
+
+  walk(doc)
+  return ids
 }
 
 /**
  * Render a validated TipTap doc against a data map into a styled container
  * element. The element is detached — the caller mounts it (preview) and/or
  * hands it to the PDF exporter.
+ *
+ * blockMap resolves live snippet references (blockRef nodes) to the referenced
+ * block's `doc`; see collectBlockRefIds for building it. Omit it for a doc with
+ * no references — unresolved references render a visible [missing snippet] marker.
  */
-export function renderTemplate(doc, dataMap = {}) {
+export function renderTemplate(doc, dataMap = {}, blockMap = {}) {
   const root = document.createElement('div')
   root.className = 'report-doc'
   root.setAttribute('style', ROOT_STYLE)
 
   if (doc?.type === 'doc') {
-    appendChildren(root, doc, dataMap)
+    appendChildren(root, doc, dataMap, blockMap)
   }
 
   return root

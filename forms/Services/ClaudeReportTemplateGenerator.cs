@@ -165,7 +165,7 @@ public class ClaudeReportTemplateGenerator(
         // The current template arrives in a request body like anything else. Gate it
         // on the way in as well as on the way out: the allowlist that guards a save
         // is also what bounds the size and shape of what we put before the model.
-        if (!ReportTemplateValidator.TryValidate(currentContent, out var currentError))
+        if (!ReportTemplateValidator.TryValidate(currentContent, allowBlockRefs: true, out var currentError))
         {
             return ReportGenerationResult.Fail($"The current report is not valid: {currentError}");
         }
@@ -282,7 +282,9 @@ public class ClaudeReportTemplateGenerator(
         var document = BuildDocument(generated, lookup);
 
         // Same gate as a hand-built save. Generated content gets no special trust.
-        if (!ReportTemplateValidator.TryValidate(document, out var error))
+        // Templates may carry blockRef nodes (the model won't emit them, but the
+        // gate must accept what a saved template can hold).
+        if (!ReportTemplateValidator.TryValidate(document, allowBlockRefs: true, out var error))
         {
             logger.LogWarning("Generated report failed validation: {Error}", error);
             return ReportGenerationResult.Fail($"The generated report was rejected: {error}");
