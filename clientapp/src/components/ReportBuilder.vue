@@ -78,9 +78,17 @@ const openTemplateId = ref('') // bound to the "Open existing" picker
 const blocks = ref([]) // {id, name, kind, formId} from GET /api/blocks
 const blockMap = ref({}) // id -> block `content` (doc), for referenced blocks
 const insertBlockId = ref('') // bound to the insert-snippet picker
-const snippetName = ref('') // name for a snippet being saved
+const snippetName = ref('') // name for a snippet being saved/edited
 const snippetKind = ref('snippet') // header | footer | snippet
 const snippetState = ref({ status: 'idle', message: '' })
+
+// Snippet editing. When editing an existing block, the editor holds the block's
+// own content (not a report), currentBlockId is its id, and Save becomes an
+// in-place update — keeping the id so every report that references it picks up
+// the change. Null means we're editing a report, the ordinary mode.
+const currentBlockId = ref(null)
+const editBlockId = ref('') // bound to the "Edit a snippet" picker
+const editingBlock = computed(() => currentBlockId.value !== null)
 
 // Uploaded image assets (logos, letterheads, branding). A report's image node
 // references an asset by id; the renderer builds the src from the id.
@@ -355,6 +363,7 @@ async function generate() {
     // one — the prompt is a starting point, not a finished artifact. It's a new,
     // unsaved report, so clear any prior template identity.
     currentTemplateId.value = null
+    currentBlockId.value = null // generating a report leaves snippet-edit mode
     openTemplateId.value = ''
     reportName.value = result.name ?? reportName.value
     editor.value.commands.setContent(result.content)
@@ -493,6 +502,93 @@ async function saveAsSnippet() {
   }
 }
 
+// Load a saved block into the editor to edit it in place. Its content replaces
+// whatever is in the editor (like opening a report), and its form becomes the
+// active form so the block's merge fields resolve. This is a distinct mode:
+// currentBlockId marks that Save now updates the block, not a report.
+async function startEditBlock() {
+  const id = editBlockId.value
+  editBlockId.value = ''
+  if (!id || !editor.value) return
+
+  try {
+    const res = await fetch(apiUrl(`/blocks/${id}`))
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const block = await res.json()
+
+    // Leaving report mode: drop any open-report identity so a later report save
+    // can't overwrite a report with block content.
+    currentTemplateId.value = null
+    openTemplateId.value = ''
+
+    currentBlockId.value = block.id
+    snippetName.value = block.name
+    snippetKind.value = block.kind
+    selectedFormId.value = block.formId ?? '' // triggers the field-list reload
+    editor.value.commands.setContent(block.content)
+    docJson.value = editor.value.getJSON()
+    snippetState.value = { status: 'idle', message: '' }
+    goTo(2)
+  } catch (err) {
+    snippetState.value = { status: 'error', message: err.message }
+  }
+}
+
+// Save the block being edited back in place (PUT), keeping its id so every report
+// that references it picks up the change. The whole editor document is the block's
+// new content.
+async function updateBlock() {
+  if (!editor.value || !editingBlock.value) return
+
+  const name = snippetName.value.trim()
+  if (!name) {
+    snippetState.value = { status: 'error', message: 'Name the snippet first.' }
+    return
+  }
+
+  const id = currentBlockId.value
+  snippetState.value = { status: 'saving', message: '' }
+  try {
+    const res = await fetch(apiUrl(`/blocks/${id}`), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        kind: snippetKind.value,
+        formId: selectedFormId.value || null,
+        content: editor.value.getJSON(),
+      }),
+    })
+
+    if (!res.ok) {
+      const problem = await res.json().catch(() => null)
+      throw new Error(problem?.detail ?? `HTTP ${res.status}`)
+    }
+
+    // Drop the cached copy so any report referencing this block re-fetches the
+    // updated content the next time its preview renders.
+    if (id in blockMap.value) {
+      const { [id]: _removed, ...rest } = blockMap.value
+      blockMap.value = rest
+    }
+
+    snippetState.value = { status: 'saved', message: 'Snippet updated — reports that reference it will reflect the change.' }
+    await loadBlocks()
+  } catch (err) {
+    snippetState.value = { status: 'error', message: err.message }
+  }
+}
+
+// Leave snippet-edit mode and return to a fresh, empty report.
+function exitBlockEdit() {
+  currentBlockId.value = null
+  snippetName.value = ''
+  snippetKind.value = 'snippet'
+  editor.value?.commands.setContent(emptyDoc())
+  docJson.value = editor.value?.getJSON()
+  snippetState.value = { status: 'idle', message: '' }
+}
+
 // --- image assets ----------------------------------------------------------
 
 // Insert an already-uploaded image at the cursor by asset id. The alt defaults to
@@ -558,6 +654,7 @@ function clearImageInput() {
 
 function newReport() {
   currentTemplateId.value = null
+  currentBlockId.value = null
   openTemplateId.value = ''
   reportName.value = 'Untitled report'
   editor.value?.commands.setContent(emptyDoc())
@@ -577,6 +674,7 @@ async function openTemplate() {
     const tpl = await res.json()
     reportName.value = tpl.name
     currentTemplateId.value = tpl.id
+    currentBlockId.value = null // opening a report leaves snippet-edit mode
     selectedFormId.value = tpl.formId // triggers the field-list reload
     editor.value?.commands.setContent(tpl.content)
     docJson.value = editor.value?.getJSON()
@@ -590,6 +688,15 @@ async function openTemplate() {
 
 async function save() {
   if (!editor.value) return
+  // Guard against the report save while the editor holds a snippet: use Update /
+  // Done in the Snippets panel instead, so block content never lands as a report.
+  if (editingBlock.value) {
+    saveState.value = {
+      status: 'error',
+      message: 'You’re editing a snippet — use Update or Done in the Snippets panel first.',
+    }
+    return
+  }
   if (!hasForm.value) {
     saveState.value = { status: 'error', message: 'Choose a form for this report first.' }
     return
@@ -799,17 +906,33 @@ async function downloadPdf() {
         </p>
       </section>
 
-      <!-- Reusable blocks: save the current selection/document, or drop a saved one in -->
-      <section class="panel snippets">
+      <!-- Reusable blocks: insert, save, or edit a snippet in place -->
+      <section class="panel snippets" :class="{ editing: editingBlock }">
         <h2>Snippets</h2>
+
+        <!-- Snippet-edit mode banner: the editor holds the snippet itself now. -->
+        <div v-if="editingBlock" class="editing-banner" data-testid="editing-banner">
+          <span>
+            Editing the snippet <strong>{{ snippetName || 'snippet' }}</strong> itself —
+            the editor below is the snippet, not a report. Updating it changes every
+            report that references it.
+          </span>
+        </div>
+
         <div class="snippet-controls">
           <label class="field snippet-insert">
             <span>Insert a saved snippet</span>
             <select
               v-model="insertBlockId"
               data-testid="insert-block"
-              :disabled="blocks.length === 0"
-              :title="blocks.length ? 'Insert a saved snippet at the cursor' : 'No snippets saved yet'"
+              :disabled="editingBlock || blocks.length === 0"
+              :title="
+                editingBlock
+                  ? 'A snippet can’t reference another snippet'
+                  : blocks.length
+                    ? 'Insert a saved snippet at the cursor'
+                    : 'No snippets saved yet'
+              "
               @change="insertSelectedBlock"
             >
               <option value="" disabled>
@@ -821,9 +944,28 @@ async function downloadPdf() {
             </select>
           </label>
 
+          <!-- Edit picker: load a saved snippet into the editor to change it. -->
+          <label v-if="!editingBlock" class="field snippet-edit">
+            <span>Edit a snippet</span>
+            <select
+              v-model="editBlockId"
+              data-testid="edit-block"
+              :disabled="blocks.length === 0"
+              :title="blocks.length ? 'Open a snippet to edit it' : 'No snippets saved yet'"
+              @change="startEditBlock"
+            >
+              <option value="" disabled>
+                {{ blocks.length ? 'Edit snippet…' : 'No snippets saved yet' }}
+              </option>
+              <option v-for="b in blocks" :key="b.id" :value="b.id">
+                {{ kindLabel(b.kind) }} · {{ b.name }}
+              </option>
+            </select>
+          </label>
+
           <div class="snippet-save">
             <label class="field snippet-name">
-              <span>Save as snippet</span>
+              <span>{{ editingBlock ? 'Snippet name' : 'Save as snippet' }}</span>
               <input
                 v-model="snippetName"
                 type="text"
@@ -837,7 +979,24 @@ async function downloadPdf() {
                 <option v-for="k in SNIPPET_KINDS" :key="k.value" :value="k.value">{{ k.label }}</option>
               </select>
             </label>
+
+            <!-- Update (in place) + Done while editing; Save (create) otherwise. -->
+            <template v-if="editingBlock">
+              <button
+                type="button"
+                class="primary"
+                data-testid="update-snippet"
+                :disabled="snippetState.status === 'saving'"
+                @click="updateBlock"
+              >
+                {{ snippetState.status === 'saving' ? 'Updating…' : 'Update snippet' }}
+              </button>
+              <button type="button" class="ghost" data-testid="done-editing" @click="exitBlockEdit">
+                Done
+              </button>
+            </template>
             <button
+              v-else
               type="button"
               class="primary"
               data-testid="save-snippet"
@@ -856,7 +1015,12 @@ async function downloadPdf() {
         >
           {{ snippetState.message }}
         </p>
-        <p class="hint">
+        <p v-if="editingBlock" class="hint">
+          Change the snippet, then <em>Update snippet</em> to save it back — the id
+          is kept, so live references stay intact and update. <em>Done</em> returns
+          to a fresh report. A snippet can’t contain another snippet reference.
+        </p>
+        <p v-else class="hint">
           Select part of the document to save just that (e.g. the client-info
           header), or save the whole document. Insert drops a live reference —
           editing the snippet later updates every report that references it. Use
@@ -1334,6 +1498,27 @@ h2 {
 
 .snippet-kind {
   min-width: 7rem;
+}
+
+.snippet-edit {
+  min-width: 16rem;
+}
+
+/* Snippet-edit mode: tint the panel and show a banner so it's unmistakable the
+   editor holds the snippet itself, not a report. */
+.snippets.editing {
+  border-color: #f0c27a;
+  background: #fffaf0;
+}
+
+.editing-banner {
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.82rem;
+  color: #8a5a00;
+  background: #fdf1d6;
+  border: 1px solid #f0c27a;
+  border-radius: 0.4rem;
 }
 
 /* The image library controls, mirroring the snippet controls. */
